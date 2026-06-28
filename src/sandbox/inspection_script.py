@@ -106,7 +106,13 @@ def run(file_path: str) -> None:
         "head": head_rows_safe,
     }
 
-    json.dump(result, sys.stdout, ensure_ascii=False, indent=2, default=str)
+    data = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    # Write UTF-8 bytes directly to avoid Windows GBK encoding issues.
+    # Fall back to plain write() for test environments where stdout is StringIO.
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout.buffer.write(data.encode("utf-8"))
+    else:
+        sys.stdout.write(data)
 
 
 if __name__ == "__main__":

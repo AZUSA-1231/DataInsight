@@ -31,11 +31,19 @@ def _check_prerequisites(args: argparse.Namespace) -> None:
             f"  Set them before running:\n"
             f"    export DATAINSIGHT_LLM_MODEL=\"gpt-4o\"\n"
             f"    export DATAINSIGHT_LLM_API_KEY=\"sk-...\"\n"
-            f"  Or for other providers:\n"
+            f"  For non-OpenAI providers, also set:\n"
             f"    export DATAINSIGHT_LLM_BASE_URL=\"https://api.deepseek.com/v1\"",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    model = os.environ.get("DATAINSIGHT_LLM_MODEL", "")
+    base_url = os.environ.get("DATAINSIGHT_LLM_BASE_URL", "")
+    provider_hint = base_url or "https://api.openai.com/v1 (default)"
+
+    print(f"  LLM model : {model}")
+    print(f"  Base URL  : {provider_hint}")
+    print()
 
     if not Path(args.file_path).exists():
         print(f"[ERROR] File not found: {args.file_path}", file=sys.stderr)
