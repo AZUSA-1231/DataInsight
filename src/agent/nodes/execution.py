@@ -78,8 +78,13 @@ and produce a FIXED, complete Python script.
 
 FAILURE ANALYSIS:
 1. Identify the root cause from the error message.
-2. Common causes: wrong column names (check the execution plan for actual columns),
-   missing imports, type mismatches, NaN not handled, path issues.
+2. Common causes and fixes:
+   - **ImportError / ModuleNotFoundError**: the package is NOT installed. Remove the
+     import entirely and reimplement using ONLY pandas, numpy, and Python stdlib.
+     DO NOT try a different import name — the package is simply not available.
+   - **Wrong column names**: check the execution plan for actual column names.
+   - **Type mismatches / NaN**: add pd.to_numeric(), fillna(), or dropna().
+   - **Path / encoding issues**: verify the file exists and encoding is correct.
 3. Fix ONLY what's broken — do not rewrite the entire analysis logic.
 
 Same rules as before:

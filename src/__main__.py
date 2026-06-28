@@ -81,6 +81,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--save-intermediates",
+        "-s",
+        action="store_true",
+        help="Save all intermediate artifacts (audit reports, generated scripts, etc.)",
+    )
     return parser
 
 
@@ -89,6 +95,64 @@ def _print_report(report: str) -> None:
     print("=" * 72)
     print(report)
     print("=" * 72)
+
+
+def _save_intermediates(state: AgentState, output_dir: str) -> None:
+    """Save all intermediate artifacts to a directory for inspection."""
+    import json as _json
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    artifacts: list[tuple[str, str]] = []
+
+    if state.get("data_report"):
+        artifacts.append(("data_report.md", state["data_report"]))
+    if state.get("business_plan"):
+        artifacts.append(("business_plan.md", state["business_plan"]))
+    if state.get("execution_plan"):
+        artifacts.append(("execution_plan.md", state["execution_plan"]))
+
+    exec_result = state.get("execution_result", {})
+    if exec_result:
+        # Save parsed output as JSON
+        if "parsed_output" in exec_result:
+            artifacts.append(
+                ("execution_result.json",
+                 _json.dumps(exec_result["parsed_output"], ensure_ascii=False, indent=2))
+            )
+        # Save generated scripts from attempts
+        for i, attempt in enumerate(exec_result.get("attempts", [])):
+            code = attempt.get("code", "")
+            err = attempt.get("error", "")
+            content = f"# Attempt {i + 1}\n# Error: {err}\n\n{code}" if code else err
+            artifacts.append((f"script_attempt_{i + 1}.py", content))
+        # Save final successful script
+        if "script_path" in exec_result:
+            script_path = exec_result["script_path"]
+            if os.path.exists(script_path):
+                try:
+                    with open(script_path, encoding="utf-8") as src_f:
+                        artifacts.append(("final_script.py", src_f.read()))
+                except OSError:
+                    pass
+        # Save raw stdout
+        if "stdout" in exec_result:
+            artifacts.append(("execution_stdout.txt", exec_result["stdout"]))
+
+    if state.get("error"):
+        artifacts.append(("error.txt", state["error"]))
+
+    for filename, content in artifacts:
+        filepath = os.path.join(output_dir, filename)
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(str(content))
+        except OSError as e:
+            print(f"  [WARNING] Could not save {filename}: {e}", file=sys.stderr)
+
+    print(f"\nIntermediate artifacts saved to: {output_dir}/")
+    for filename, _ in artifacts:
+        print(f"  - {filename}")
 
 
 _STAGE_LABELS: dict[str, str] = {
@@ -165,6 +229,10 @@ def main() -> None:
         error = state.get("error", "Unknown error")
         print(f"\n[ERROR] Report generation failed: {error}", file=sys.stderr)
 
+    if args.save_intermediates:
+        intermediates_dir = output_path.replace(".md", "_intermediates")
+        _save_intermediates(state, intermediates_dir)
+
     # In-session iteration loop
     while True:
         print()
@@ -199,6 +267,10 @@ def main() -> None:
         else:
             error = state.get("error", "Unknown error")
             print(f"\n[ERROR] Report revision failed: {error}", file=sys.stderr)
+
+        if args.save_intermediates:
+            intermediates_dir = output_path.replace(".md", "_intermediates")
+            _save_intermediates(state, intermediates_dir)
 
 
 if __name__ == "__main__":
