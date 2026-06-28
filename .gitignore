@@ -27,3 +27,4 @@ Thumbs.db
 
 # Local settings (may contain personal paths)
 .claude/settings.local.json
+*.csv
