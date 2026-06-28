@@ -14,6 +14,10 @@ import sys
 from pathlib import Path
 from typing import cast
 
+from typing import Any
+
+from langgraph.graph.state import CompiledStateGraph
+
 from src.agent.graph import build_graph
 from src.agent.state import AgentState
 
@@ -85,6 +89,36 @@ def _print_report(report: str) -> None:
     print("=" * 72)
 
 
+_STAGE_LABELS: dict[str, str] = {
+    "data_track": "Stage 1a — Data Audit",
+    "business_track": "Stage 1b — Business Analysis",
+    "decision_match": "Stage 2  — Data-Business Alignment",
+    "execution": "Stage 3  — Sandbox Execution",
+    "report_gen": "Stage 4  — Report Assembly",
+}
+
+
+def _run_graph(
+    state: AgentState, graph: CompiledStateGraph[AgentState, Any, AgentState, AgentState]
+) -> AgentState:
+    """Run the graph with streaming progress display."""
+    seen: set[str] = set()
+    state_out: dict[str, Any] = dict(state)
+
+    for chunk in graph.stream(state, stream_mode="updates"):
+        for node_name in chunk:
+            if node_name in _STAGE_LABELS:
+                is_retry = node_name in seen
+                tag = " (retry)" if is_retry else ""
+                print(f"  [{_STAGE_LABELS[node_name]}]{tag}")
+                seen.add(node_name)
+
+            if isinstance(chunk[node_name], dict):
+                state_out = {**state_out, **chunk[node_name]}
+
+    return cast(AgentState, state_out)
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -92,7 +126,7 @@ def main() -> None:
     _check_prerequisites(args)
 
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s [%(name)s] %(message)s",
     )
 
@@ -111,8 +145,7 @@ def main() -> None:
 
     # First run
     try:
-        result = graph.invoke(state)
-        state = cast(AgentState, result)
+        state = _run_graph(state, graph)
     except Exception as e:
         print(f"\n[FATAL] Pipeline failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -146,8 +179,7 @@ def main() -> None:
         state["feedback"] = feedback
 
         try:
-            result = graph.invoke(state)
-            state = cast(AgentState, result)
+            state = _run_graph(state, graph)
         except Exception as e:
             print(f"\n[FATAL] Iteration failed: {e}", file=sys.stderr)
             sys.exit(1)

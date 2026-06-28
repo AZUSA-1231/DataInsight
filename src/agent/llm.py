@@ -44,6 +44,8 @@ def get_llm(temperature: float | None = None) -> BaseChatModel:
             "model": model,
             "api_key": api_key,
             "temperature": temp,
+            "timeout": 120,
+            "max_retries": 1,
         }
         if base_url:
             kwargs["base_url"] = base_url
