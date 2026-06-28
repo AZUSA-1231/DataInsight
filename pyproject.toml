@@ -1,0 +1,49 @@
+[project]
+name = "datainsight"
+version = "0.1.0"
+description = "Progressive data analysis AI agent with enforced four-stage state machine"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "pandas>=2.2.0",
+    "openpyxl>=3.1.0",
+    "matplotlib>=3.9.0",
+    "numpy>=2.0.0",
+]
+
+[project.scripts]
+datainsight = "src.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pandas-stubs>=2.2.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+]
+testpaths = ["tests"]
