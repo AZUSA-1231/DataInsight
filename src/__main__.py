@@ -9,13 +9,37 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import cast
 
 from src.agent.graph import build_graph
 from src.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
+
+_REQUIRED_ENV_VARS = ["DATAINSIGHT_LLM_MODEL", "DATAINSIGHT_LLM_API_KEY"]
+
+
+def _check_prerequisites(args: argparse.Namespace) -> None:
+    """Fail fast with a clear message before invoking the expensive graph."""
+    missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
+    if missing:
+        print(
+            f"[ERROR] Missing environment variables: {', '.join(missing)}\n"
+            f"  Set them before running:\n"
+            f"    export DATAINSIGHT_LLM_MODEL=\"gpt-4o\"\n"
+            f"    export DATAINSIGHT_LLM_API_KEY=\"sk-...\"\n"
+            f"  Or for other providers:\n"
+            f"    export DATAINSIGHT_LLM_BASE_URL=\"https://api.deepseek.com/v1\"",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not Path(args.file_path).exists():
+        print(f"[ERROR] File not found: {args.file_path}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -56,6 +80,8 @@ def _print_report(report: str) -> None:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    _check_prerequisites(args)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,

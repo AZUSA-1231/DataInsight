@@ -77,7 +77,8 @@ def test_execution_node_missing_execution_plan() -> None:
 
     assert "error" in new_state
     assert "execution_plan" in new_state["error"]
-    assert "execution_result" not in new_state
+    # Should set retry_count=3 to prevent infinite ReAct loop on permanent error
+    assert new_state["execution_result"]["retry_count"] == 3
 
 
 @pytest.mark.unit

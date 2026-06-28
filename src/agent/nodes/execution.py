@@ -130,6 +130,10 @@ def execution_node(state: AgentState) -> AgentState:
         return {
             **state,
             "error": "Execution: execution_plan not available (Decision Match may have failed)",
+            "execution_result": {
+                "retry_count": 3,  # Prevent infinite retry — this is a permanent error
+                "attempts": [],
+            },
         }
 
     exec_result = state.get("execution_result", {})
@@ -158,7 +162,15 @@ def execution_node(state: AgentState) -> AgentState:
         code = raw if isinstance(raw, str) else str(raw)
     except Exception as e:
         logger.error("Execution: LLM call failed: %s", e)
-        return {**state, "error": f"Execution LLM error: {e}"}
+        return {
+            **state,
+            "error": f"Execution LLM error: {e}",
+            "execution_result": {
+                "retry_count": retry_count + 1,
+                "attempts": attempts,
+                "output_dir": output_dir,
+            },
+        }
 
     code = _extract_code_block(code)
 
