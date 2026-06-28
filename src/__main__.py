@@ -12,9 +12,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import cast
-
-from typing import Any
+from typing import Any, cast
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -23,7 +21,11 @@ from src.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_ENV_VARS = ["DATAINSIGHT_LLM_MODEL", "DATAINSIGHT_LLM_API_KEY"]
+_REQUIRED_ENV_VARS = [
+    "DATAINSIGHT_LLM_MODEL",
+    "DATAINSIGHT_LLM_API_KEY",
+    "DATAINSIGHT_LLM_BASE_URL",
+]
 
 
 def _check_prerequisites(args: argparse.Namespace) -> None:
@@ -32,21 +34,21 @@ def _check_prerequisites(args: argparse.Namespace) -> None:
     if missing:
         print(
             f"[ERROR] Missing environment variables: {', '.join(missing)}\n"
-            f"  Set them before running:\n"
-            f"    export DATAINSIGHT_LLM_MODEL=\"gpt-4o\"\n"
-            f"    export DATAINSIGHT_LLM_API_KEY=\"sk-...\"\n"
-            f"  For non-OpenAI providers, also set:\n"
-            f"    export DATAINSIGHT_LLM_BASE_URL=\"https://api.deepseek.com/v1\"",
+            f"\n  All three are required. Examples:\n"
+            f"\n  OpenAI:\n"
+            f'    set DATAINSIGHT_LLM_MODEL=gpt-4o\n'
+            f'    set DATAINSIGHT_LLM_API_KEY=sk-...\n'
+            f'    set DATAINSIGHT_LLM_BASE_URL=https://api.openai.com/v1\n'
+            f"\n  DeepSeek:\n"
+            f'    set DATAINSIGHT_LLM_MODEL=deepseek-chat\n'
+            f'    set DATAINSIGHT_LLM_API_KEY=sk-...\n'
+            f'    set DATAINSIGHT_LLM_BASE_URL=https://api.deepseek.com/v1\n',
             file=sys.stderr,
         )
         sys.exit(1)
 
-    model = os.environ.get("DATAINSIGHT_LLM_MODEL", "")
-    base_url = os.environ.get("DATAINSIGHT_LLM_BASE_URL", "")
-    provider_hint = base_url or "https://api.openai.com/v1 (default)"
-
-    print(f"  LLM model : {model}")
-    print(f"  Base URL  : {provider_hint}")
+    print(f"  LLM model : {os.environ['DATAINSIGHT_LLM_MODEL']}")
+    print(f"  Base URL  : {os.environ['DATAINSIGHT_LLM_BASE_URL']}")
     print()
 
     if not Path(args.file_path).exists():

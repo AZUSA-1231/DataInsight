@@ -47,6 +47,7 @@ def set_llm_env() -> None:
     """Set minimal env vars so LLM factory doesn't error (real key not needed for mock tests)."""
     os.environ["DATAINSIGHT_LLM_MODEL"] = "gpt-4o"
     os.environ["DATAINSIGHT_LLM_API_KEY"] = "sk-test-mock"
+    os.environ["DATAINSIGHT_LLM_BASE_URL"] = "https://api.openai.com/v1"
 
 
 @pytest.fixture
