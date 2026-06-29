@@ -50,7 +50,11 @@ CRITICAL RULES:
    Excel (.xls/.xlsx). Print encoding used as first line (stderr is fine).
 9. Do NOT write anything to stdout except the final JSON line. Use stderr for
    progress and debug messages.
-10. Include `if __name__ == "__main__":` guard.
+10. For datasets with >10,000 rows, use VECTORIZED pandas operations (groupby,
+   pivot_table, value_counts, .explode()) instead of .iterrows() or Python for
+   loops. Nested for loops on DataFrames are FORBIDDEN — they will timeout.
+11. Always verify column data types before calling .explode() or .str accessor.
+12. Include `if __name__ == "__main__":` guard.
 
 ---
 
@@ -85,6 +89,9 @@ FAILURE ANALYSIS:
    - **Wrong column names**: check the execution plan for actual column names.
    - **Type mismatches / NaN**: add pd.to_numeric(), fillna(), or dropna().
    - **Path / encoding issues**: verify the file exists and encoding is correct.
+   - **Timeout (120s)**: the script was too slow. Replace ALL .iterrows() or nested
+     Python for loops with vectorized pandas (groupby, pivot_table, value_counts,
+     .explode(), .apply()). For large datasets, sample down to 30K rows first.
 3. Fix ONLY what's broken — do not rewrite the entire analysis logic.
 
 Same rules as before:
@@ -226,7 +233,11 @@ def execution_node(state: AgentState) -> AgentState:
         return new_state  # type: ignore[return-value]
 
     # Sandbox failure — build error for ReAct
-    error_msg = result.stderr.strip() or result.stdout.strip() or f"Exit code {result.exit_code}"
+    error_msg = (
+        (result.stderr or "").strip()
+        or (result.stdout or "").strip()
+        or f"Exit code {result.exit_code}"
+    )
     if result.timed_out:
         error_msg = f"[TIMEOUT after 120s]\n{error_msg}"
 

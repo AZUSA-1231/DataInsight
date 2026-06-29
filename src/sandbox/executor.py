@@ -39,11 +39,12 @@ def run_script(
             cmd,
             capture_output=True,
             encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
         )
         return SandboxResult(
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
             exit_code=completed.returncode,
             timed_out=False,
         )

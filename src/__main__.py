@@ -147,6 +147,27 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
     if state.get("error"):
         artifacts.append(("error.txt", state["error"]))
 
+    # Copy chart images from sandbox output_dir to intermediates
+    exec_result = state.get("execution_result", {})
+    charts_src_dir = exec_result.get("output_dir", "")
+    if charts_src_dir and os.path.isdir(charts_src_dir):
+        import shutil as _shutil
+
+        charts_dst_dir = os.path.join(output_dir, "charts")
+        os.makedirs(charts_dst_dir, exist_ok=True)
+        chart_count = 0
+        for fname in sorted(os.listdir(charts_src_dir)):
+            if fname.lower().endswith(".png"):
+                src = os.path.join(charts_src_dir, fname)
+                dst = os.path.join(charts_dst_dir, fname)
+                try:
+                    _shutil.copy2(src, dst)
+                    chart_count += 1
+                except OSError:
+                    pass
+        if chart_count:
+            print(f"  Charts saved to: {charts_dst_dir}/ ({chart_count} image(s))")
+
     for filename, content in artifacts:
         filepath = os.path.join(output_dir, filename)
         try:
