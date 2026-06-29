@@ -21,34 +21,39 @@ from src.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_ENV_VARS = [
-    "DATAINSIGHT_LLM_MODEL",
-    "DATAINSIGHT_LLM_API_KEY",
-    "DATAINSIGHT_LLM_BASE_URL",
-]
-
-
 def _check_prerequisites(args: argparse.Namespace) -> None:
     """Fail fast with a clear message before invoking the expensive graph."""
-    missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
+    from src.agent.llm import _load_dotenv
+
+    _load_dotenv()
+
+    missing = []
+    for var in ("DATAINSIGHT_LLM_MODEL", "DATAINSIGHT_LLM_API_KEY", "DATAINSIGHT_LLM_BASE_URL"):
+        if not os.environ.get(var):
+            missing.append(var)
+
     if missing:
-        print(
-            f"[ERROR] Missing environment variables: {', '.join(missing)}\n"
-            f"\n  All three are required. Examples:\n"
-            f"\n  OpenAI:\n"
-            f'    set DATAINSIGHT_LLM_MODEL=gpt-4o\n'
-            f'    set DATAINSIGHT_LLM_API_KEY=sk-...\n'
-            f'    set DATAINSIGHT_LLM_BASE_URL=https://api.openai.com/v1\n'
-            f"\n  DeepSeek:\n"
-            f'    set DATAINSIGHT_LLM_MODEL=deepseek-chat\n'
-            f'    set DATAINSIGHT_LLM_API_KEY=sk-...\n'
-            f'    set DATAINSIGHT_LLM_BASE_URL=https://api.deepseek.com/v1\n',
-            file=sys.stderr,
-        )
+        env_file = Path(".env")
+        if not env_file.exists():
+            print(
+                f"[ERROR] Missing configuration: {', '.join(missing)}\n"
+                f"\n  No .env file found. Create one by copying the template:\n"
+                f"    copy .env.example .env\n"
+                f"  Then edit .env with your API key and model settings.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[ERROR] .env file exists but missing: {', '.join(missing)}\n"
+                f"  Edit .env and add the missing values.",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     print(f"  LLM model : {os.environ['DATAINSIGHT_LLM_MODEL']}")
     print(f"  Base URL  : {os.environ['DATAINSIGHT_LLM_BASE_URL']}")
+    if Path(".env").exists():
+        print("  Config    : .env file")
     print()
 
     if not Path(args.file_path).exists():
