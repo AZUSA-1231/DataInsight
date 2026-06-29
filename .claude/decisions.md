@@ -271,4 +271,100 @@ for each stage, or a web-based report viewer.
 
 ---
 
-*Last updated: M4 complete. DataInsight MVP is feature-complete.*
+---
+
+## D16 — Subprocess encoding tolerance via `errors="replace"`
+
+**Date**: post-MVP | **Scope**: [src/sandbox/executor.py](src/sandbox/executor.py)
+
+LLM-generated scripts run on Windows may output GBK-encoded Chinese text via
+`print()`. The original `subprocess.run(encoding="utf-8")` would crash the reader
+thread with `UnicodeDecodeError`, leading to `stdout=None` → `.strip()` →
+`AttributeError` → entire pipeline FATAL.
+
+**Fix**: `errors="replace"` replaces undecodable bytes with `�` instead of
+crashing. Additionally, `or ""` guards on all stdout/stderr values prevent
+`NoneType` from reaching `.strip()`.
+
+**Trade-off**: Garbled characters (`�`) in error messages are better than a
+dead pipeline. The LLM can still diagnose the error from the English traceback
+portion.
+
+---
+
+## D17 — Prompt-driven performance constraints
+
+**Date**: post-MVP | **Scope**: [src/agent/nodes/execution.py](src/agent/nodes/execution.py)
+
+The code-gen prompt now explicitly bans `.iterrows()` and nested Python for loops
+on datasets >10,000 rows, requiring vectorized pandas operations instead. The
+ReAct prompt includes a "Timeout (120s)" case telling the LLM to switch to
+vectorized ops or sample to 30K rows.
+
+**Why**: On the 122K-row games.csv, the LLM generated `.iterrows()` loops that
+either OOM'd or exceeded the 120s timeout. Vectorized operations complete in
+seconds on the same data.
+
+**Risk**: Prompt constraint is advisory — the LLM can still generate `.iterrows()`.
+It's a nudge, not enforcement.
+
+**Revisit when**: we add a static-analysis check for banned patterns before
+allowing a generated script to run.
+
+---
+
+## D18 — Chart persistence via `--save-intermediates`
+
+**Date**: post-MVP | **Scope**: [src/__main__.py](src/__main__.py)
+
+Generated chart `.png` files reside in a `tempfile.mkdtemp()` directory inside
+the sandbox. Without `--save-intermediates`, these images are lost when the OS
+cleans up temp files.
+
+**Fix**: `_save_intermediates()` now copies all `.png` files from the sandbox
+output directory into `<output>_intermediates/charts/`.
+
+**Trade-off**: Charts are duplicated (temp + intermediates). The temp copy still
+gets cleaned by the OS. This is acceptable for CLI use; a server deployment
+would want a configurable output directory instead of temp.
+
+---
+
+## D19 — Pre-installed dependency policy (scikit-learn, scipy)
+
+**Date**: post-MVP | **Scope**: [pyproject.toml](pyproject.toml)
+
+scikit-learn and scipy were added as hard dependencies rather than letting the
+LLM discover their absence at runtime.
+
+**Why**: The original approach was "let the LLM import whatever it needs, and
+ReAct will fix ImportError." But ReAct only gets 3 attempts — wasting one on
+a missing package reduces debugging budget for real problems. Pre-installing
+the most likely ML/statistics packages reduces ImportError frequency.
+
+**Trade-off**: Larger install footprint. scipy is ~30MB. Acceptable for a
+desktop CLI tool; would be different for a serverless function.
+
+---
+
+## D20 — `.env` file for persistent LLM configuration
+
+**Date**: post-MVP | **Scope**: [src/agent/llm.py](src/agent/llm.py)
+
+LLM credentials (model, API key, base URL) are read from a `.env` file in the
+project root, with environment variables taking precedence when both exist.
+
+**Why**: On Windows CMD, `set` only lasts for the current terminal session.
+Users had to re-enter credentials every time they opened a new terminal. The
+`.env` file is IDE-editable and survives reboots.
+
+**Implementation**: `_load_dotenv()` is a minimal parser (~15 lines) that reads
+`KEY=VALUE` lines, strips quotes, and only sets keys not already in `os.environ`.
+No python-dotenv dependency needed.
+
+**Security**: `.env` is git-ignored. `.env.example` is checked in as a template.
+`_check_prerequisites()` gives clear "no .env found" / ".env exists but missing
+X" error messages.
+
+---
+*Last updated: post-MVP hardening complete. 52 tests passing, all validation clean.*
