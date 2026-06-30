@@ -457,4 +457,124 @@ time proportional to the slower of the two LLM calls.
 
 ---
 
-*Last updated: V2 Phase 0 starting. D21-D26 decisions documented.*
+*Last updated: V2 Phase 4 complete. D21-D32 decisions documented.*
+
+---
+
+## D27 — V2: Unified `make_execution_plan` factory over per-test helpers
+
+**Date**: V2 Phase 4 | **Scope**: tests/conftest.py, tests/test_*.py
+
+Phase 3-4 中三个测试文件各自定义了 `_make_plan()` helper，签名和行为不一致：
+`test_preprocessing.py` 使用 `[] or [default]` 模式（空列表是 falsy，默认值始终生效），
+`test_execution.py` 和 `test_graph.py` 使用硬编码 `[]`。这种分歧直接导致了 L1 bug。
+
+**决策**：在 `tests/conftest.py` 中提供 `make_execution_plan(**overrides)` fixture，
+使用 `is not None` 模式处理所有 Optional 集合字段。各测试文件中的独立 `_make_plan()`
+全部替换。
+
+**Why**: 统一工厂消除签名歧义，确保所有测试使用相同的默认值语义。
+`is not None` 是 Python `Optional[list]` 字段唯一正确的默认值模式。
+
+**Implementation**: Phase 5a 完成。
+
+---
+
+## D28 — V2: Deprecate global `_EXECUTION_PLAN_JSON`
+
+**Date**: V2 Phase 4 | **Scope**: tests/test_graph.py
+
+`tests/test_graph.py` 中的 `_EXECUTION_PLAN_JSON` 是模块级常量，7 个集成测试共享。
+当 preprocessing_steps 为空时，4 个测试的 mock 断言与 skip 路径不匹配（L3）。
+修改字段会级联影响所有共享该常量的测试。
+
+**决策**：删除 `_EXECUTION_PLAN_JSON` 和 `_REVISED_PLAN_JSON` 全局常量。
+每个集成测试通过 `make_execution_plan(preprocessing_steps=[...], analysis_steps=[...])`
+显式声明所需 plan。
+
+**Why**: 显式构造使每个测试的意图可见且独立。一个测试的 plan 修改不会影响其他测试。
+测试可以精确控制是否触发 skip 路径。
+
+**Trade-off**: 测试代码会略长（每个测试显式传参）。收益远大于成本。
+
+**Implementation**: Phase 5a 完成。
+
+---
+
+## D29 — V2: Mandatory `set_llm_env` on all node tests
+
+**Date**: V2 Phase 4 | **Scope**: all tests/test_*.py
+
+L1+L2 的组合故障暴露了一个防御缺口：`test_preprocessing_node_no_steps_skips`
+未声明 `set_llm_env`。L1 bug 导致 LLM 路径被意外触发，OpenAI SDK 直接报 401。
+双重叠加使排查多绕了一圈。
+
+**决策**：所有函数名包含 `_node_` 且带 `set_llm_env` fixture 的测试函数，
+**必须**声明 `set_llm_env` 参数，无例外。即使当前代码路径理论上不会调 LLM。
+
+**Why**: 前置防御成本极低（一个 fixture 参数），收益是防止真实 API key 消耗
+和 401 噪音。skip 分支可能因未来的 bug 或代码变更而不触发——不能依赖"LLM 不会被调"
+的假设作为安全网。
+
+**Enforcement**: Phase 5a 审查所有测试，添加遗漏的 fixture 声明。
+
+---
+
+## D30 — V2: Smoke test for real sandbox execution
+
+**Date**: V2 Phase 4 | **Scope**: tests/test_smoke.py (new)
+
+当前所有测试都 mock 了 `run_script`，沙箱执行路径零覆盖。pandas 版本差异、
+编码问题、依赖缺失都只会在生产端到端运行时暴露。
+
+**决策**：新增 `tests/test_smoke.py`，mock LLM（返回固定的清洗/分析脚本），
+但**不 mock `run_script`**。验证 LLM 生成的代码可在真实 Python subprocess 中运行。
+
+**Why**: Mock 沙箱意味着"我们信任 LLM 生成正确代码且环境兼容"。
+这个假设已经被 history 打破（122K 行数据上的 `.iterrows()` 导致超时）。
+真实 subprocess 测试是唯一的防线。
+
+**Scope**: Smoke test 不需要跑完整的 LLM pipeline — LLM 输出是 mock 的。
+只验证 subprocess 执行路径：进程启动、编码检测、超时机制、JSON 输出解析。
+
+**Implementation**: Phase 5a 完成骨架，5b+6 扩展覆盖。
+
+---
+
+## D31 — V2: Remove `contextlib.suppress(NotImplementedError)` from graph tests
+
+**Date**: V2 Phase 4 | **Scope**: tests/test_graph.py
+
+`test_graph_data_track_integration` 使用 `contextlib.suppress(NotImplementedError)`
+吞掉 graph.invoke 中未 mock 节点的错误。这是 D6（占位 stub 抛 NotImplementedError
+做 fail-fast）的遗留产物。
+
+**决策**：Phase 5a 中移除该 suppress。graph.invoke 集成测试必须 mock 链上所有节点
+的 LLM 和 sandbox，确保每个节点都被显式验证。
+
+**Why**: 如果新插入节点未正确 mock，测试应该失败——而不是被 suppress 悄悄吞掉。
+这正是 Phase 4 初期 mock_pre 未生效但没被发现的原因。
+
+**How**: mock report_gen 节点的 LLM（简单返回 `"# Report\n\nTest."`），
+移除 `contextlib.suppress`。
+
+---
+
+## D32 — V2: Phase 5a (debt repayment) before Phase 5b (analysis node)
+
+**Date**: V2 Phase 4 | **Scope**: scheduling / implementation order
+
+L1 和 L3 在 Phase 5 会完全重现：`analysis_steps=[]` 导致 analysis 节点 skip，
+mock 断言再次不匹配，`set_llm_env` 可能再次缺失。
+
+**决策**：Phase 5 分为两个子阶段：
+- Phase 5a — D27-D31 的债务清偿 + conftest 重构，测试数 78 → ~82
+- Phase 5b — analysis 节点开发，测试数 ~82 → ~92
+
+Phase 5a 必须在 5b 之前完成并全绿。
+
+**Why**: 避免同样的错误模式反复出现。先清偿债务，再在新功能上验证防御措施有效。
+这是"先修地基，再盖楼"——而不是在脆弱的基础上加高楼层。
+
+**Risk**: 如果 Phase 5a 范围膨胀，可能 delay 5b。Mitigation: 5a scope 严格限定
+为 D27-D31，不涉及任何 src/ 逻辑变更。
