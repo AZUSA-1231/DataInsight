@@ -37,6 +37,16 @@ class AnalysisIntent(BaseModel):
     comparison_baseline: str | None = None
 
 
+class ExecutionPlan(BaseModel):
+    """Planner output: concrete analysis plan bridging data reality to business goals."""
+
+    feasibility_map: list[dict[str, Any]]
+    model_selections: list[dict[str, Any]]
+    preprocessing_steps: list[dict[str, Any]]
+    analysis_steps: list[dict[str, Any]]
+    alignment_notes: str
+
+
 class AgentState(BaseModel):
     """Shared state flowing through the analysis pipeline.
 
@@ -49,7 +59,8 @@ class AgentState(BaseModel):
     data_profile: DataProfile | None = None
     cleaning_insights: str | None = None
     analysis_intent: AnalysisIntent | None = None
-    execution_plan: str | None = None
+    execution_plan: ExecutionPlan | None = None
+    preprocessing_result: dict[str, Any] | None = None
     execution_result: dict[str, Any] | None = None
     final_report: str | None = None
     error: str | None = None

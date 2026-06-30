@@ -128,7 +128,12 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
             )
         )
     if state.execution_plan:
-        artifacts.append(("execution_plan.md", state.execution_plan))
+        artifacts.append(
+            (
+                "execution_plan.json",
+                _json.dumps(state.execution_plan.model_dump(), ensure_ascii=False, indent=2),
+            )
+        )
 
     exec_result = state.execution_result or {}
     if exec_result:

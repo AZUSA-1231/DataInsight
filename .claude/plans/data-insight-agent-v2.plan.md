@@ -223,8 +223,8 @@ python -m src data.csv "分析问题" -s -v
 - [x] Phase 0: Pydantic 迁移完成，52/52 测试通过
 - [x] Phase 1: 并行 Track + Data Track 精简，54/54 测试通过
 - [x] Phase 2: Business Track 收窄为意图理解器，56/56 测试通过
-- [ ] Phase 3: Decision Match → Planner（模型选型 + 完整推理链）
-- [ ] Phase 4: Preprocessing 节点（含 ReAct）
+- [x] Phase 3: Decision Match → Planner（模型选型 + 完整推理链）
+- [x] Phase 4: Preprocessing 节点（含 ReAct）
 - [ ] Phase 5: Analysis 节点（含 ReAct）
 - [ ] Phase 6: Report Gen 重构
 - [ ] 端到端测试：`python -m src data.csv "问题" -s -v` 产出干净报告

@@ -8,10 +8,42 @@ from src.agent.nodes.execution import (
     _build_code_gen_prompt,
     _build_react_fix_prompt,
     _extract_code_block,
+    _serialize_execution_plan,
     execution_node,
 )
-from src.agent.state import AgentState
+from src.agent.state import AgentState, ExecutionPlan
 from src.sandbox.executor import SandboxResult
+
+
+def _make_plan() -> ExecutionPlan:
+    return ExecutionPlan(
+        feasibility_map=[],
+        model_selections=[],
+        preprocessing_steps=[],
+        analysis_steps=[
+            {
+                "step": 1,
+                "action": "compute_correlation",
+                "target_columns": ["sales"],
+                "method": "pandas.DataFrame.corr",
+                "expected_output": "correlation matrix",
+            }
+        ],
+        alignment_notes="Test plan.",
+    )
+
+
+@pytest.mark.unit
+def test_serialize_execution_plan() -> None:
+    plan = _make_plan()
+    text = _serialize_execution_plan(plan)
+    assert "feasibility_map" in text
+    assert "alignment_notes" in text
+
+
+@pytest.mark.unit
+def test_serialize_execution_plan_string_fallback() -> None:
+    assert _serialize_execution_plan("plain string plan") == "plain string plan"
 
 
 @pytest.mark.unit
@@ -34,9 +66,7 @@ def test_extract_code_block_no_language_tag() -> None:
 
 @pytest.mark.unit
 def test_build_code_gen_prompt_structure() -> None:
-    prompt = _build_code_gen_prompt(
-        "## 分析执行计划\nClean data, run EDA.", "/tmp/data.csv", "/tmp/out"
-    )
+    prompt = _build_code_gen_prompt(_make_plan(), "/tmp/data.csv", "/tmp/out")
 
     assert "senior data engineer" in prompt.lower()
     assert "Agg" in prompt
@@ -44,7 +74,7 @@ def test_build_code_gen_prompt_structure() -> None:
     assert "NO network calls" in prompt
     assert "try/except" in prompt or "try / except" in prompt
     assert "cleaned_shape" in prompt
-    assert "## 分析执行计划" in prompt
+    assert "feasibility_map" in prompt
     assert "/tmp/data.csv" in prompt
     assert "/tmp/out" in prompt
 
@@ -52,7 +82,7 @@ def test_build_code_gen_prompt_structure() -> None:
 @pytest.mark.unit
 def test_build_react_fix_prompt_includes_error() -> None:
     prompt = _build_react_fix_prompt(
-        "Execution plan here.",
+        _make_plan(),
         "print(df.col)\n",
         "NameError: name 'df' is not defined",
         "/tmp/data.csv",
@@ -62,7 +92,7 @@ def test_build_react_fix_prompt_includes_error() -> None:
     assert "debugging specialist" in prompt.lower()
     assert "NameError: name 'df' is not defined" in prompt
     assert "print(df.col)" in prompt
-    assert "Execution plan here." in prompt
+    assert "feasibility_map" in prompt
     assert "FIXED" in prompt
 
 
@@ -100,7 +130,7 @@ def test_execution_node_success_first_attempt(set_llm_env: None, temp_output_dir
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
-        execution_plan="## 分析执行计划\nClean data.",
+        execution_plan=_make_plan(),
     )
 
     with (
@@ -138,7 +168,7 @@ def test_execution_node_sandbox_error_triggers_retry(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
-        execution_plan="## 分析执行计划\nUse column 'sales'.",
+        execution_plan=_make_plan(),
     )
 
     with (
@@ -170,10 +200,11 @@ def test_execution_node_react_retry_then_success(set_llm_env: None, temp_output_
     mock_response.content = "print(df['sales_col'])\n"
     mock_llm.invoke.return_value = mock_response
 
+    plan = _make_plan()
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
-        execution_plan="## 分析执行计划\nUse 'revenue' column.",
+        execution_plan=plan,
     )
 
     with (
@@ -189,7 +220,7 @@ def test_execution_node_react_retry_then_success(set_llm_env: None, temp_output_
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
-        execution_plan="## 分析执行计划\nUse 'revenue' column.",
+        execution_plan=plan,
         execution_result=state_dict["execution_result"],
     )
 
@@ -238,7 +269,7 @@ def test_execution_node_timeout_handling(set_llm_env: None, temp_output_dir: str
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
-        execution_plan="Plan here.",
+        execution_plan=_make_plan(),
     )
 
     with (
@@ -271,7 +302,7 @@ def test_execution_node_invalid_json_output(set_llm_env: None, temp_output_dir: 
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
-        execution_plan="Plan.",
+        execution_plan=_make_plan(),
     )
 
     with (
@@ -312,7 +343,7 @@ def test_execution_node_preserves_state(
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\nExisting insights.",
         analysis_intent=sample_analysis_intent,
-        execution_plan="## 分析执行计划\nExecute this.",
+        execution_plan=_make_plan(),
     )
 
     with (
@@ -335,7 +366,7 @@ def test_execution_node_llm_error(set_llm_env: None) -> None:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
-        execution_plan="Plan.",
+        execution_plan=_make_plan(),
     )
 
     with patch("src.agent.nodes.execution.get_llm", return_value=mock_llm):

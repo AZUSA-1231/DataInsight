@@ -10,7 +10,17 @@ from src.agent.nodes.report_gen import (
     _serialize_execution_result,
     report_gen_node,
 )
-from src.agent.state import AgentState
+from src.agent.state import AgentState, ExecutionPlan
+
+
+def _make_plan() -> ExecutionPlan:
+    return ExecutionPlan(
+        feasibility_map=[],
+        model_selections=[],
+        preprocessing_steps=[],
+        analysis_steps=[],
+        alignment_notes="基于当前数据，本报告能够部分回答用户问题。",
+    )
 
 
 @pytest.mark.unit
@@ -47,7 +57,7 @@ def test_build_full_report_prompt_structure(
         "清洗建议内容。",
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
-        "Execution plan.",
+        _make_plan().model_dump_json(indent=2),
         '{"insights": ["test"]}',
         "Why did sales drop?",
     )
@@ -62,12 +72,14 @@ def test_build_full_report_prompt_structure(
     assert "局限性与后续建议" in prompt
     assert "Why did sales drop?" in prompt
     assert "清洗建议内容" in prompt
-    assert "Execution plan." in prompt
+    assert "feasibility_map" in prompt
 
 
 @pytest.mark.unit
 def test_build_full_report_prompt_mandatory_alignment() -> None:
-    prompt = _build_full_report_prompt("CI", "{}", "{}", "EP", "{}", "question")
+    prompt = _build_full_report_prompt(
+        "CI", "{}", "{}", _make_plan().model_dump_json(indent=2), "{}", "question"
+    )
     assert "MANDATORY" in prompt
 
 
@@ -79,7 +91,7 @@ def test_build_partial_report_prompt_structure(
         "清洗建议。",
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
-        "Execution plan.",
+        _make_plan().model_dump_json(indent=2),
         "NameError: 'df' not defined",
         "Why?",
     )
@@ -111,7 +123,7 @@ def test_report_gen_node_full_report(
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\n清洗。",
         analysis_intent=sample_analysis_intent,
-        execution_plan="## 分析执行计划\nExec plan.",
+        execution_plan=_make_plan(),
         execution_result=sample_execution_result,
     )
 
@@ -143,7 +155,7 @@ def test_report_gen_node_partial_report(
         data_profile=sample_data_profile,
         cleaning_insights="清洗建议。",
         analysis_intent=sample_analysis_intent,
-        execution_plan="Exec plan.",
+        execution_plan=_make_plan(),
         error="Execution error (attempt 3/3): NameError",
     )
 
@@ -174,7 +186,7 @@ def test_report_gen_node_preserves_state(
         data_profile=sample_data_profile,
         cleaning_insights="CI",
         analysis_intent=sample_analysis_intent,
-        execution_plan="EP",
+        execution_plan=_make_plan(),
         execution_result=sample_execution_result,
     )
 
@@ -201,7 +213,7 @@ def test_report_gen_node_llm_error(
         data_profile=sample_data_profile,
         cleaning_insights="CI",
         analysis_intent=sample_analysis_intent,
-        execution_plan="EP",
+        execution_plan=_make_plan(),
     )
 
     with patch("src.agent.nodes.report_gen.get_llm", return_value=mock_llm):

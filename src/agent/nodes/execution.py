@@ -7,7 +7,7 @@ import re
 import tempfile
 
 from src.agent.llm import get_llm
-from src.agent.state import AgentState
+from src.agent.state import AgentState, ExecutionPlan
 from src.sandbox.executor import SandboxResult, run_script
 
 logger = logging.getLogger(__name__)
@@ -21,9 +21,17 @@ def _extract_code_block(text: str) -> str:
     return text.strip()
 
 
-def _build_code_gen_prompt(execution_plan: str, file_path: str, output_dir: str) -> str:
+def _serialize_execution_plan(execution_plan: object) -> str:
+    """Serialize ExecutionPlan to text for inclusion in code-gen prompts."""
+    if isinstance(execution_plan, ExecutionPlan):
+        return execution_plan.model_dump_json(indent=2)
+    return str(execution_plan)
+
+
+def _build_code_gen_prompt(execution_plan: object, file_path: str, output_dir: str) -> str:
+    plan_text = _serialize_execution_plan(execution_plan)
     return f"""You are a senior data engineer. Write a COMPLETE, runnable Python script
-that executes the analysis plan below.
+that executes the analysis plan below (provided as structured JSON).
 
 CRITICAL RULES:
 1. The script MUST accept exactly two CLI arguments: sys.argv[1] = data file path,
@@ -56,9 +64,9 @@ CRITICAL RULES:
 
 ---
 
-**ANALYSIS EXECUTION PLAN:**
+**ANALYSIS EXECUTION PLAN (JSON):**
 
-{execution_plan}
+{plan_text}
 
 ---
 
@@ -68,12 +76,13 @@ CRITICAL RULES:
 
 
 def _build_react_fix_prompt(
-    execution_plan: str,
+    execution_plan: object,
     previous_code: str,
     error_message: str,
     file_path: str,
     output_dir: str,
 ) -> str:
+    plan_text = _serialize_execution_plan(execution_plan)
     return f"""You are a debugging specialist. The Python script below was generated to
 execute a data analysis plan, but it FAILED. Your job: diagnose the root cause
 and produce a FIXED, complete Python script.
@@ -99,9 +108,9 @@ Same rules as before:
 
 ---
 
-**ORIGINAL EXECUTION PLAN:**
+**ORIGINAL EXECUTION PLAN (JSON):**
 
-{execution_plan}
+{plan_text}
 
 ---
 
@@ -129,7 +138,7 @@ Output the FIXED complete Python script (with ```python fence).
 def execution_node(state: AgentState) -> dict[str, object]:
     """Stage 3 — Execution: generate analysis code, run in sandbox, ReAct retry on error.
 
-    Reads: state.execution_plan, state.file_path, state.execution_result
+    Reads: state.execution_plan (ExecutionPlan), state.file_path, state.execution_result
     Writes: state.execution_result, state.error
     """
     execution_plan = state.execution_plan

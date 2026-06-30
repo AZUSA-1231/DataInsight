@@ -9,8 +9,20 @@ from src.agent.nodes.business_track import business_track_node
 from src.agent.nodes.data_track import data_track_node
 from src.agent.nodes.decision_match import decision_match_node
 from src.agent.nodes.execution import execution_node
+from src.agent.nodes.preprocessing import preprocessing_node
 from src.agent.nodes.report_gen import report_gen_node
 from src.agent.state import AgentState
+
+
+def _should_retry_preprocessing(
+    state: AgentState,
+) -> Literal["preprocessing", "execution", "report_gen"]:
+    retry_count = (state.preprocessing_result or {}).get("retry_count", 0)
+    if state.error and retry_count < 3:
+        return "preprocessing"
+    if state.error and retry_count >= 3:
+        return "report_gen"
+    return "execution"
 
 
 def _should_retry_execution(state: AgentState) -> Literal["execution", "report_gen"]:
@@ -57,6 +69,7 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
     graph.add_node("data_track", data_track_node)
     graph.add_node("business_track", business_track_node)
     graph.add_node("decision_match", decision_match_node)
+    graph.add_node("preprocessing", preprocessing_node)
     graph.add_node("execution", execution_node)
     graph.add_node("report_gen", report_gen_node)
 
@@ -67,7 +80,18 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
     graph.add_edge("data_track", "decision_match")
     graph.add_edge("business_track", "decision_match")
 
-    graph.add_edge("decision_match", "execution")
+    # Decision Match → Preprocessing (with ReAct retry, fallback to report_gen)
+    graph.add_edge("decision_match", "preprocessing")
+    graph.add_conditional_edges(
+        "preprocessing",
+        _should_retry_preprocessing,
+        {
+            "preprocessing": "preprocessing",
+            "execution": "execution",
+            "report_gen": "report_gen",
+        },
+    )
+
     graph.add_conditional_edges(
         "execution",
         _should_retry_execution,

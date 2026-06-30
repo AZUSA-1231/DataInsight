@@ -1,11 +1,52 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 
 from src.agent.llm import get_llm
-from src.agent.state import AgentState
+from src.agent.state import AgentState, ExecutionPlan
 
 logger = logging.getLogger(__name__)
+
+_EXECUTION_PLAN_SCHEMA = """{
+  "feasibility_map": [
+    {
+      "intent_dimension": "dimension name",
+      "matched_columns": ["col1"],
+      "feasibility": "可直接实现",
+      "confidence": "High",
+      "reasoning": "why this mapping works or doesn't"
+    }
+  ],
+  "model_selections": [
+    {
+      "analysis_step": "step name",
+      "method": "scipy.stats.ttest_ind / sklearn.linear_model.LinearRegression / ...",
+      "reasoning": "why this method given the data types and column availability",
+      "feasibility": "可直接实现 | 需清洗后实现 | 需替代方案 | 不可实现"
+    }
+  ],
+  "preprocessing_steps": [
+    {
+      "step": 1,
+      "action": "drop_null_columns | impute_median | encode_onehot | ...",
+      "target_columns": ["col1", "col2"],
+      "urgency": "阻断项 | 高优先 | 低优先",
+      "reason": "based on Cleaning Insights"
+    }
+  ],
+  "analysis_steps": [
+    {
+      "step": 1,
+      "action": "compute_correlation | groupby_aggregate | run_ttest | ...",
+      "target_columns": ["col1"],
+      "method": "pandas .corr() / scipy.stats.ttest_ind / ...",
+      "expected_output": "correlation matrix / p-value / chart"
+    }
+  ],
+  "alignment_notes": "MANDATORY honesty statement about what the data can vs cannot answer"
+}"""
 
 
 def _build_decision_prompt(
@@ -14,52 +55,27 @@ def _build_decision_prompt(
     return f"""You are a data-analysis architect. Your job is to bridge business goals with
 data reality. You receive a structured Data Profile (columns, types, statistics),
 Cleaning Insights (quality issues found), and a structured Analysis Intent
-(the user's analytical goal in JSON). Your output is a concrete, prioritized
-Execution Plan.
+(the user's analytical goal in JSON).
 
 CRITICAL RULES:
 1. NEVER invent columns that do not appear in the Data Profile.
-2. When a business metric cannot be computed from available data, you MUST flag it
-   as **[不可实现]** and propose the closest feasible alternative.
-3. If a column flagged as **[严重缺失/建议禁用]** (>90% missing) appears essential
-   to a core metric, flag it as **[阻塞]** and explain why the pipeline cannot proceed.
+2. When a business metric cannot be computed from available data, mark its feasibility
+   as "不可实现" and propose the closest feasible alternative in reasoning.
+3. If a column flagged as >90% missing appears essential to a core metric, mark it
+   as "阻塞" in the preprocessing urgency field.
 4. Use the Cleaning Insights to prioritize preprocessing steps.
+5. model_selections: for each analysis step, recommend a specific concrete method
+   (e.g. "scipy.stats.ttest_ind", "sklearn.linear_model.LinearRegression",
+   "pandas.DataFrame.corr"). Include the reasoning chain.
+6. alignment_notes: MANDATORY section — explicitly state what the business wants to
+   know vs. what the data can actually answer, assumptions made, limitations, and a
+   one-sentence honesty statement about whether the data can fully answer the question.
 
-Report structure (use exactly these headings in Chinese):
+OUTPUT: ONLY a single JSON object matching this EXACT schema (no markdown fences,
+no surrounding text). Every field is required.
 
-## 分析执行计划
-
-### 1. 指标可行性映射
-For each dimension and target in the Analysis Intent:
-- Which column(s) from the Data Profile can compute it?
-- Feasibility: **[可直接实现]** / **[需清洗后实现]** / **[需替代方案]** / **[不可实现]**
-- Confidence: High / Medium / Low
-
-### 2. 数据缺口与替代方案
-- Intent dimensions that have NO matching data column → flag as gap
-- Proposed alternative: what is the closest approximation we CAN compute?
-- If a gap is a showstopper, say so explicitly.
-
-### 3. 清洗优先级
-Based on the Cleaning Insights, rank cleaning actions by urgency:
-- **[阻断项]**: must clean before ANY analysis (e.g., >90% missing key column)
-- **[高优先]**: strongly affects result quality
-- **[低优先]**: cosmetic or optional
-
-### 4. 分析执行步骤
-Numbered, ordered list of concrete steps to execute in the sandbox:
-1. Data loading & type correction
-2. Cleaning steps (drop, impute, encode — be specific per column)
-3. EDA steps (correlations, distributions, group-bys)
-4. Modeling steps (if applicable)
-5. Chart generation (specific charts with specific columns)
-
-### 5. 数据与业务对齐备忘
-This section is MANDATORY. Explicitly state:
-- What the business wants to know vs. what the data can actually answer
-- Any assumptions made in bridging the gap
-- Limitations the report reader should be aware of
-- A one-sentence honesty statement: "基于当前数据，本报告能够/无法完全回答用户问题，原因在于..."
+Schema:
+{_EXECUTION_PLAN_SCHEMA}
 
 ---
 
@@ -85,7 +101,7 @@ def _build_decision_prompt_with_feedback(
     data_profile_json: str,
     cleaning_insights: str,
     analysis_intent_json: str,
-    previous_execution_plan: str,
+    previous_execution_plan_json: str,
     feedback: str,
 ) -> str:
     return f"""You are a data-analysis architect. The user has reviewed a previous analysis
@@ -95,30 +111,22 @@ the feedback, while staying grounded in the data profile and analysis intent.
 USER FEEDBACK:
 {feedback}
 
-PREVIOUS EXECUTION PLAN:
-{previous_execution_plan}
+PREVIOUS EXECUTION PLAN (JSON):
+{previous_execution_plan_json}
 
 INSTRUCTIONS:
-1. Address the user's feedback FIRST — revise relevant sections of the plan.
+1. Address the user's feedback FIRST — revise relevant parts of the plan.
 2. Keep sections that the user did not complain about.
-3. Follow the same structure and rules as the original plan.
+3. Follow the same schema and rules as the original plan.
 4. The user's feedback may require different charts, different groupings,
    different cleaning approaches, or different metrics — be flexible.
+5. In alignment_notes, note what was revised and why.
 
-Report structure (same as before, use exactly these headings in Chinese):
+OUTPUT: ONLY a single JSON object matching this EXACT schema (no markdown fences,
+no surrounding text). Every field is required.
 
-## 分析执行计划 [修订版]
-
-### 1. 指标可行性映射
-(Updated based on feedback. Mark changed items with **[已修订]**)
-
-### 2. 数据缺口与替代方案
-
-### 3. 清洗优先级
-
-### 4. 分析执行步骤
-
-### 5. 数据与业务对齐备忘
+Schema:
+{_EXECUTION_PLAN_SCHEMA}
 
 ---
 
@@ -140,13 +148,27 @@ Report structure (same as before, use exactly these headings in Chinese):
 """
 
 
+def _extract_json(text: str) -> str:
+    """Extract JSON object from LLM output, handling markdown fences."""
+    text = text.strip()
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+    # Try to find first { to last }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
 def decision_match_node(state: AgentState) -> dict[str, object]:
     """Stage 2 — Decision Match (Planner): align structured analysis intent with
-    available data, produce execution plan. Supports feedback-driven revision.
+    available data, produce structured ExecutionPlan. Supports feedback-driven revision.
 
     Reads: state.data_profile, state.cleaning_insights, state.analysis_intent,
            state.feedback, state.execution_plan
-    Writes: state.execution_plan
+    Writes: state.execution_plan (ExecutionPlan)
     Consumes: state.feedback
     """
     data_profile = state.data_profile
@@ -170,9 +192,10 @@ def decision_match_node(state: AgentState) -> dict[str, object]:
         logger.info(
             "Decision Match: revising plan based on user feedback (%d chars)", len(feedback)
         )
-        previous_plan = state.execution_plan or ""
+        prev = state.execution_plan
+        previous_plan_json = prev.model_dump_json(indent=2) if prev else "{}"
         prompt = _build_decision_prompt_with_feedback(
-            data_profile_json, insights_text, intent_json, previous_plan, feedback
+            data_profile_json, insights_text, intent_json, previous_plan_json, feedback
         )
     else:
         logger.info(
@@ -191,6 +214,32 @@ def decision_match_node(state: AgentState) -> dict[str, object]:
         logger.error("Decision Match: LLM call failed: %s", e)
         return {"error": f"Decision Match LLM error: {e}"}
 
-    logger.info("Decision Match: execution plan generated (%d chars)", len(content))
+    json_text = _extract_json(content)
 
-    return {"execution_plan": content, "feedback": None}
+    try:
+        parsed = json.loads(json_text)
+        execution_plan = ExecutionPlan(
+            feasibility_map=parsed["feasibility_map"],
+            model_selections=parsed["model_selections"],
+            preprocessing_steps=parsed["preprocessing_steps"],
+            analysis_steps=parsed["analysis_steps"],
+            alignment_notes=parsed["alignment_notes"],
+        )
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.error("Decision Match: failed to parse ExecutionPlan JSON: %s", e)
+        logger.debug("Decision Match: raw LLM output (first 500 chars): %s", content[:500])
+        return {
+            "error": f"Decision Match: failed to parse structured output: {e}",
+            "feedback": None,
+        }
+
+    logger.info(
+        "Decision Match: execution plan generated — %d feasibility items, %d models, "
+        "%d preproc steps, %d analysis steps",
+        len(execution_plan.feasibility_map),
+        len(execution_plan.model_selections),
+        len(execution_plan.preprocessing_steps),
+        len(execution_plan.analysis_steps),
+    )
+
+    return {"execution_plan": execution_plan, "feedback": None}

@@ -129,6 +129,51 @@ def sample_analysis_intent() -> object:
 
 
 @pytest.fixture
+def sample_execution_plan() -> object:
+    """A minimal ExecutionPlan for execution, report_gen, and graph tests."""
+    from src.agent.state import ExecutionPlan
+
+    return ExecutionPlan(
+        feasibility_map=[
+            {
+                "intent_dimension": "region",
+                "matched_columns": ["region"],
+                "feasibility": "可直接实现",
+                "confidence": "High",
+                "reasoning": "Column 'region' directly matches the intent dimension",
+            }
+        ],
+        model_selections=[
+            {
+                "analysis_step": "Sales trend analysis",
+                "method": "pandas.DataFrame.corr + scipy.stats.ttest_ind",
+                "reasoning": "Continuous target with categorical dimension — t-test appropriate",
+                "feasibility": "可直接实现",
+            }
+        ],
+        preprocessing_steps=[
+            {
+                "step": 1,
+                "action": "drop_null_rows",
+                "target_columns": ["region"],
+                "urgency": "高优先",
+                "reason": "2% nulls in region column — small loss acceptable",
+            }
+        ],
+        analysis_steps=[
+            {
+                "step": 1,
+                "action": "compute_correlation",
+                "target_columns": ["sales", "region"],
+                "method": "pandas.DataFrame.corr",
+                "expected_output": "correlation matrix",
+            }
+        ],
+        alignment_notes="基于当前数据，本报告能够部分回答用户问题。",
+    )
+
+
+@pytest.fixture
 def temp_output_dir() -> str:
     """Create a temporary directory for chart output in execution tests."""
     import tempfile

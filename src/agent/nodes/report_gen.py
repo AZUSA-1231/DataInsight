@@ -20,7 +20,7 @@ def _build_full_report_prompt(
     cleaning_insights: str,
     data_profile_json: str,
     analysis_intent_json: str,
-    execution_plan: str,
+    execution_plan_json: str,
     execution_result_json: str,
     user_requirement: str,
 ) -> str:
@@ -96,9 +96,9 @@ List all generated charts with brief descriptions.
 
 ---
 
-**ANALYSIS EXECUTION PLAN:**
+**ANALYSIS EXECUTION PLAN (JSON):**
 
-{execution_plan}
+{execution_plan_json}
 
 ---
 
@@ -118,7 +118,7 @@ def _build_partial_report_prompt(
     cleaning_insights: str,
     data_profile_json: str,
     analysis_intent_json: str,
-    execution_plan: str,
+    execution_plan_json: str,
     error_message: str,
     user_requirement: str,
 ) -> str:
@@ -184,9 +184,9 @@ What the user can do next.
 
 ---
 
-**ANALYSIS EXECUTION PLAN:**
+**ANALYSIS EXECUTION PLAN (JSON):**
 
-{execution_plan}
+{execution_plan_json}
 
 ---
 
@@ -208,13 +208,14 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
     cleaning_insights = state.cleaning_insights or ""
     data_profile = state.data_profile
     analysis_intent = state.analysis_intent
-    execution_plan = state.execution_plan or ""
+    execution_plan = state.execution_plan
     execution_result = state.execution_result or {}
     error = state.error
     user_requirement = state.user_requirement
 
     data_profile_json = data_profile.model_dump_json(indent=2) if data_profile else "{}"
     intent_json = analysis_intent.model_dump_json(indent=2) if analysis_intent else "{}"
+    plan_json = execution_plan.model_dump_json(indent=2) if execution_plan else "{}"
 
     has_execution_results = bool(execution_result.get("parsed_output") and not error)
 
@@ -225,7 +226,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
             cleaning_insights,
             data_profile_json,
             intent_json,
-            execution_plan,
+            plan_json,
             result_json,
             user_requirement,
         )
@@ -236,7 +237,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
             cleaning_insights,
             data_profile_json,
             intent_json,
-            execution_plan,
+            plan_json,
             error_msg,
             user_requirement,
         )
