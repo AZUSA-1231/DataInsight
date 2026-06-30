@@ -27,6 +27,16 @@ class DataProfile(BaseModel):
     encoding: str | None = None
 
 
+class AnalysisIntent(BaseModel):
+    """Structured analytical intent extracted from the user's business question."""
+
+    core_question: str
+    target_variable: str | None = None
+    analysis_type: str
+    dimensions: list[str]
+    comparison_baseline: str | None = None
+
+
 class AgentState(BaseModel):
     """Shared state flowing through the analysis pipeline.
 
@@ -38,7 +48,7 @@ class AgentState(BaseModel):
     user_requirement: str
     data_profile: DataProfile | None = None
     cleaning_insights: str | None = None
-    business_plan: str | None = None
+    analysis_intent: AnalysisIntent | None = None
     execution_plan: str | None = None
     execution_result: dict[str, Any] | None = None
     final_report: str | None = None

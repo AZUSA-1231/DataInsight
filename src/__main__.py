@@ -120,8 +120,13 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
         )
     if state.cleaning_insights:
         artifacts.append(("cleaning_insights.md", state.cleaning_insights))
-    if state.business_plan:
-        artifacts.append(("business_plan.md", state.business_plan))
+    if state.analysis_intent:
+        artifacts.append(
+            (
+                "analysis_intent.json",
+                _json.dumps(state.analysis_intent.model_dump(), ensure_ascii=False, indent=2),
+            )
+        )
     if state.execution_plan:
         artifacts.append(("execution_plan.md", state.execution_plan))
 

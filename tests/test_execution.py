@@ -290,6 +290,7 @@ def test_execution_node_preserves_state(
     set_llm_env: None,
     temp_output_dir: str,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
     _ = set_llm_env
 
@@ -310,7 +311,7 @@ def test_execution_node_preserves_state(
         user_requirement="Why did sales drop?",
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\nExisting insights.",
-        business_plan="## 业务分析蓝图\nExisting plan.",
+        analysis_intent=sample_analysis_intent,
         execution_plan="## 分析执行计划\nExecute this.",
     )
 

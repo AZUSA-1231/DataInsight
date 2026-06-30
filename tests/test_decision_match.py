@@ -9,11 +9,13 @@ from src.agent.state import AgentState
 
 
 @pytest.mark.unit
-def test_build_decision_prompt_structure(sample_data_profile: object) -> None:
+def test_build_decision_prompt_structure(
+    sample_data_profile: object, sample_analysis_intent: object
+) -> None:
     prompt = _build_decision_prompt(
         sample_data_profile.model_dump_json(indent=2),
         "清洗建议内容。",
-        "Business plan here.",
+        sample_analysis_intent.model_dump_json(indent=2),
     )
 
     assert "分析执行计划" in prompt
@@ -22,16 +24,17 @@ def test_build_decision_prompt_structure(sample_data_profile: object) -> None:
     assert "清洗优先级" in prompt
     assert "分析执行步骤" in prompt
     assert "数据与业务对齐备忘" in prompt
-    assert "Business plan here." in prompt
     assert "清洗建议内容" in prompt
 
 
 @pytest.mark.unit
-def test_build_decision_prompt_mandatory_alignment_notes(sample_data_profile: object) -> None:
+def test_build_decision_prompt_mandatory_alignment_notes(
+    sample_data_profile: object, sample_analysis_intent: object
+) -> None:
     prompt = _build_decision_prompt(
         sample_data_profile.model_dump_json(indent=2),
         "清洗建议。",
-        "Business plan.",
+        sample_analysis_intent.model_dump_json(indent=2),
     )
 
     assert "MANDATORY" in prompt or "mandatory" in prompt.lower()
@@ -42,6 +45,7 @@ def test_build_decision_prompt_mandatory_alignment_notes(sample_data_profile: ob
 def test_decision_match_node_success(
     set_llm_env: None,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
     _ = set_llm_env
 
@@ -55,7 +59,7 @@ def test_decision_match_node_success(
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\n清理缺失值。",
-        business_plan="## 业务分析蓝图\nBusiness plan.",
+        analysis_intent=sample_analysis_intent,
     )
 
     with patch("src.agent.nodes.decision_match.get_llm", return_value=mock_llm):
@@ -71,6 +75,7 @@ def test_decision_match_node_success(
 def test_decision_match_node_consumes_feedback(
     set_llm_env: None,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
     _ = set_llm_env
 
@@ -84,7 +89,7 @@ def test_decision_match_node_consumes_feedback(
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
         cleaning_insights="清洗建议。",
-        business_plan="Business plan.",
+        analysis_intent=sample_analysis_intent,
         feedback="Use different chart type.",
     )
 
@@ -99,6 +104,7 @@ def test_decision_match_node_consumes_feedback(
 def test_decision_match_node_preserves_state(
     set_llm_env: None,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
     _ = set_llm_env
 
@@ -112,7 +118,7 @@ def test_decision_match_node_preserves_state(
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
         cleaning_insights="清洗建议。",
-        business_plan="Business plan.",
+        analysis_intent=sample_analysis_intent,
     )
 
     with patch("src.agent.nodes.decision_match.get_llm", return_value=mock_llm):
@@ -122,11 +128,11 @@ def test_decision_match_node_preserves_state(
 
 
 @pytest.mark.unit
-def test_decision_match_node_missing_data_profile() -> None:
+def test_decision_match_node_missing_data_profile(sample_analysis_intent: object) -> None:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
-        business_plan="Business plan.",
+        analysis_intent=sample_analysis_intent,
     )
 
     new_state = decision_match_node(state)
@@ -137,7 +143,7 @@ def test_decision_match_node_missing_data_profile() -> None:
 
 
 @pytest.mark.unit
-def test_decision_match_node_missing_business_plan(sample_data_profile: object) -> None:
+def test_decision_match_node_missing_analysis_intent(sample_data_profile: object) -> None:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
@@ -148,5 +154,5 @@ def test_decision_match_node_missing_business_plan(sample_data_profile: object) 
     new_state = decision_match_node(state)
 
     assert "error" in new_state
-    assert "business_plan" in new_state["error"]
+    assert "analysis_intent" in new_state["error"]
     assert "execution_plan" not in new_state

@@ -19,7 +19,7 @@ def _serialize_execution_result(execution_result: dict[str, object]) -> str:
 def _build_full_report_prompt(
     cleaning_insights: str,
     data_profile_json: str,
-    business_plan: str,
+    analysis_intent_json: str,
     execution_plan: str,
     execution_result_json: str,
     user_requirement: str,
@@ -48,11 +48,11 @@ Summarize the Data Profile and Cleaning Insights:
 - Data quality grade and issues found
 - Cleaning actions recommended and performed
 
-## 2. 业务分析框架
-Summarize the Business Analysis Blueprint:
+## 2. 业务分析意图
+Summarize the Analysis Intent:
 - Core business question restated
-- Ideal KPIs and metrics (哪些是核心指标)
-- Analysis dimensions and comparison baselines
+- Analysis type and target variable
+- Key dimensions and comparison baselines
 
 ## 3. 分析执行与结果
 From the execution results:
@@ -90,9 +90,9 @@ List all generated charts with brief descriptions.
 
 ---
 
-**BUSINESS ANALYSIS BLUEPRINT:**
+**ANALYSIS INTENT (JSON):**
 
-{business_plan}
+{analysis_intent_json}
 
 ---
 
@@ -117,7 +117,7 @@ List all generated charts with brief descriptions.
 def _build_partial_report_prompt(
     cleaning_insights: str,
     data_profile_json: str,
-    business_plan: str,
+    analysis_intent_json: str,
     execution_plan: str,
     error_message: str,
     user_requirement: str,
@@ -144,8 +144,8 @@ pre-execution findings.
 ## 1. 数据画像与清洗
 (Summarize Data Profile and Cleaning Insights)
 
-## 2. 业务分析框架
-(Summarize business_plan)
+## 2. 业务分析意图
+(Summarize analysis_intent)
 
 ## 3. 分析执行计划 (未执行)
 (Summarize execution_plan — what WAS planned but not run)
@@ -178,9 +178,9 @@ What the user can do next.
 
 ---
 
-**BUSINESS ANALYSIS BLUEPRINT:**
+**ANALYSIS INTENT (JSON):**
 
-{business_plan}
+{analysis_intent_json}
 
 ---
 
@@ -200,20 +200,21 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
     """Stage 4 — Report Generation: assemble Markdown report with mandatory
     alignment notes.
 
-    Reads: state.cleaning_insights, state.data_profile, state.business_plan,
+    Reads: state.cleaning_insights, state.data_profile, state.analysis_intent,
            state.execution_plan, state.execution_result, state.error,
            state.user_requirement
     Writes: state.final_report
     """
     cleaning_insights = state.cleaning_insights or ""
     data_profile = state.data_profile
-    business_plan = state.business_plan or ""
+    analysis_intent = state.analysis_intent
     execution_plan = state.execution_plan or ""
     execution_result = state.execution_result or {}
     error = state.error
     user_requirement = state.user_requirement
 
     data_profile_json = data_profile.model_dump_json(indent=2) if data_profile else "{}"
+    intent_json = analysis_intent.model_dump_json(indent=2) if analysis_intent else "{}"
 
     has_execution_results = bool(execution_result.get("parsed_output") and not error)
 
@@ -223,7 +224,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
         prompt = _build_full_report_prompt(
             cleaning_insights,
             data_profile_json,
-            business_plan,
+            intent_json,
             execution_plan,
             result_json,
             user_requirement,
@@ -234,7 +235,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
         prompt = _build_partial_report_prompt(
             cleaning_insights,
             data_profile_json,
-            business_plan,
+            intent_json,
             execution_plan,
             error_msg,
             user_requirement,

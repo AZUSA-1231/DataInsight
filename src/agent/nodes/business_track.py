@@ -1,79 +1,91 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from src.agent.llm import get_llm
-from src.agent.state import AgentState
+from src.agent.state import AgentState, AnalysisIntent
 
 logger = logging.getLogger(__name__)
 
+_ANALYSIS_INTENT_SCHEMA = """{
+  "core_question": "string — the user's business question restated precisely",
+  "target_variable": "string | null — the main metric/KPI to explain or predict",
+  "analysis_type": "string — one of: descriptive, diagnostic, predictive, comparative, trend",
+  "dimensions": ["string", ...] — segmentation dimensions (time, region, category, etc.)",
+  "comparison_baseline": "string | null — baseline period or group to compare against"
+}"""
 
-def _build_business_prompt(user_requirement: str) -> str:
-    return f"""You are a senior business analyst. Your ONLY job is to derive an ideal analysis
-framework from the user's business question. You do NOT have access to the data yet —
-think purely from business logic.
 
-DO NOT mention specific column names, DO NOT reference the data file, DO NOT
-suggest data cleaning steps. You are the BUSINESS track — stay in your lane.
+def _build_intent_prompt(user_requirement: str) -> str:
+    return f"""You are a precision business analyst. Your ONLY job is to extract a concise,
+structured analytical intent from the user's business question. Output VALID JSON
+matching the schema below — nothing else.
 
-Report structure (use exactly these headings in Chinese):
+CRITICAL RULES:
+1. Output ONLY the JSON object. No markdown fences, no explanations, no preamble.
+2. Do NOT invent column names or assume data fields — you have NO access to the data.
+3. Do NOT design metrics beyond what the user's question requires.
+4. Keep the analysis_type narrow: descriptive, diagnostic, predictive, comparative, or trend.
+5. dimensions should be conceptual (e.g. "time period", "region", "product category")
+   not concrete column names.
+6. If the user's question does not mention a target variable or baseline, use null.
 
-## 业务分析蓝图
-
-### 1. 业务问题重述
-Restate the user's business question in your own words. Clarify any implicit
-assumptions and define the scope of analysis.
-
-### 2. 理想指标体系
-List the KPIs and metrics that would best answer this question (assuming perfect data):
-- For each metric: define it precisely, explain WHY it matters, and specify the
-  ideal granularity (daily/weekly/monthly? by segment or overall?).
-- Mark metrics as **[核心]** (must-have) or **[补充]** (nice-to-have).
-
-### 3. 维度与切分
-What dimensions, filters, and comparison baselines are needed:
-- Time dimension: what period? Year-over-year? Month-over-month?
-- Segment dimensions: by category? by region? by user type?
-- Comparison baselines: what is the "normal" to compare against?
-
-### 4. 理想图表方案
-Describe the ideal visualization strategy to tell this story:
-- Chart types (bar, line, scatter, heatmap, etc.) and what each communicates
-- Dashboard layout logic (which charts should be viewed together?)
-- Key insights each chart should reveal
-
-### 5. 数据需求清单
-Abstract data requirements (do NOT reference specific columns):
-- What fields are essential (e.g., "a timestamp column for time-series analysis")?
-- What fields would be helpful but not essential?
-- What external data would improve the analysis if available?
+JSON schema:
+{_ANALYSIS_INTENT_SCHEMA}
 
 ---
 
-**USER'S BUSINESS QUESTION:**
+USER'S BUSINESS QUESTION:
 
 {user_requirement}
 """
 
 
 def business_track_node(state: AgentState) -> dict[str, object]:
-    """Stage 1 (parallel) — Business Track: derive ideal metrics from user's business question.
+    """Stage 1 (parallel) — Business Track: extract structured AnalysisIntent
+    from the user's business question.
 
     Reads: state.user_requirement
-    Writes: state.business_plan
+    Writes: state.analysis_intent
     """
-    logger.info("Business Track: analyzing requirement (%d chars)", len(state.user_requirement))
+    logger.info("Business Track: parsing intent (%d chars)", len(state.user_requirement))
 
-    prompt = _build_business_prompt(state.user_requirement)
+    prompt = _build_intent_prompt(state.user_requirement)
 
     try:
         llm = get_llm(temperature=0)
         response = llm.invoke(prompt)
-        content = response.content if hasattr(response, "content") else str(response)
-        content = str(content) if not isinstance(content, str) else content
+        raw = response.content if hasattr(response, "content") else str(response)
+        raw = str(raw) if not isinstance(raw, str) else raw
     except Exception as e:
         logger.error("Business Track: LLM call failed: %s", e)
         return {"error": f"Business Track LLM error: {e}"}
 
-    logger.info("Business Track: plan generated (%d chars)", len(content))
-    return {"business_plan": content}
+    # Strip markdown code fences if present
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]  # drop opening fence line
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+    try:
+        data = json.loads(raw)
+        intent = AnalysisIntent(
+            core_question=str(data.get("core_question", "")),
+            target_variable=data.get("target_variable"),
+            analysis_type=str(data.get("analysis_type", "descriptive")),
+            dimensions=[str(d) for d in data.get("dimensions", [])],
+            comparison_baseline=data.get("comparison_baseline"),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.error("Business Track: failed to parse intent JSON: %s", e)
+        return {"error": f"Business Track: intent JSON parse failed: {e}"}
+
+    logger.info(
+        "Business Track: intent parsed (type=%s, %d dimensions)",
+        intent.analysis_type,
+        len(intent.dimensions),
+    )
+    return {"analysis_intent": intent}

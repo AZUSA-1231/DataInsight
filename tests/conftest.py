@@ -115,6 +115,20 @@ def sample_data_profile() -> object:
 
 
 @pytest.fixture
+def sample_analysis_intent() -> object:
+    """A minimal AnalysisIntent for decision_match and report_gen tests."""
+    from src.agent.state import AnalysisIntent
+
+    return AnalysisIntent(
+        core_question="Why did Q2 sales drop by 15%?",
+        target_variable="sales",
+        analysis_type="diagnostic",
+        dimensions=["time period", "region", "product category"],
+        comparison_baseline="Q1 of same year",
+    )
+
+
+@pytest.fixture
 def temp_output_dir() -> str:
     """Create a temporary directory for chart output in execution tests."""
     import tempfile

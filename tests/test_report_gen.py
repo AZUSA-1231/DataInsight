@@ -40,11 +40,13 @@ def test_serialize_execution_result_without_parsed_output() -> None:
 
 
 @pytest.mark.unit
-def test_build_full_report_prompt_structure() -> None:
+def test_build_full_report_prompt_structure(
+    sample_data_profile: object, sample_analysis_intent: object
+) -> None:
     prompt = _build_full_report_prompt(
         "清洗建议内容。",
-        '{"columns": []}',
-        "Business plan.",
+        sample_data_profile.model_dump_json(indent=2),
+        sample_analysis_intent.model_dump_json(indent=2),
         "Execution plan.",
         '{"insights": ["test"]}',
         "Why did sales drop?",
@@ -53,29 +55,30 @@ def test_build_full_report_prompt_structure() -> None:
     assert "DataInsight 数据分析报告" in prompt
     assert "执行摘要" in prompt
     assert "数据画像与清洗" in prompt
-    assert "业务分析框架" in prompt
+    assert "业务分析意图" in prompt
     assert "分析执行与结果" in prompt
     assert "数据与业务对齐备忘" in prompt
     assert "图表清单" in prompt
     assert "局限性与后续建议" in prompt
     assert "Why did sales drop?" in prompt
     assert "清洗建议内容" in prompt
-    assert "Business plan." in prompt
     assert "Execution plan." in prompt
 
 
 @pytest.mark.unit
 def test_build_full_report_prompt_mandatory_alignment() -> None:
-    prompt = _build_full_report_prompt("CI", "{}", "BP", "EP", "{}", "question")
+    prompt = _build_full_report_prompt("CI", "{}", "{}", "EP", "{}", "question")
     assert "MANDATORY" in prompt
 
 
 @pytest.mark.unit
-def test_build_partial_report_prompt_structure() -> None:
+def test_build_partial_report_prompt_structure(
+    sample_data_profile: object, sample_analysis_intent: object
+) -> None:
     prompt = _build_partial_report_prompt(
         "清洗建议。",
-        '{"columns": []}',
-        "Business plan.",
+        sample_data_profile.model_dump_json(indent=2),
+        sample_analysis_intent.model_dump_json(indent=2),
         "Execution plan.",
         "NameError: 'df' not defined",
         "Why?",
@@ -93,6 +96,7 @@ def test_report_gen_node_full_report(
     set_llm_env: None,
     sample_execution_result: dict,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
     _ = set_llm_env
 
@@ -106,7 +110,7 @@ def test_report_gen_node_full_report(
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\n清洗。",
-        business_plan="## 业务分析蓝图\nPlan.",
+        analysis_intent=sample_analysis_intent,
         execution_plan="## 分析执行计划\nExec plan.",
         execution_result=sample_execution_result,
     )
@@ -121,7 +125,11 @@ def test_report_gen_node_full_report(
 
 
 @pytest.mark.unit
-def test_report_gen_node_partial_report(set_llm_env: None, sample_data_profile: object) -> None:
+def test_report_gen_node_partial_report(
+    set_llm_env: None,
+    sample_data_profile: object,
+    sample_analysis_intent: object,
+) -> None:
     _ = set_llm_env
 
     mock_llm = MagicMock()
@@ -134,7 +142,7 @@ def test_report_gen_node_partial_report(set_llm_env: None, sample_data_profile: 
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
         cleaning_insights="清洗建议。",
-        business_plan="Plan.",
+        analysis_intent=sample_analysis_intent,
         execution_plan="Exec plan.",
         error="Execution error (attempt 3/3): NameError",
     )
@@ -151,6 +159,7 @@ def test_report_gen_node_preserves_state(
     set_llm_env: None,
     sample_execution_result: dict,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
     _ = set_llm_env
 
@@ -164,7 +173,7 @@ def test_report_gen_node_preserves_state(
         user_requirement="Why?",
         data_profile=sample_data_profile,
         cleaning_insights="CI",
-        business_plan="BP",
+        analysis_intent=sample_analysis_intent,
         execution_plan="EP",
         execution_result=sample_execution_result,
     )
@@ -176,7 +185,11 @@ def test_report_gen_node_preserves_state(
 
 
 @pytest.mark.unit
-def test_report_gen_node_llm_error(set_llm_env: None, sample_data_profile: object) -> None:
+def test_report_gen_node_llm_error(
+    set_llm_env: None,
+    sample_data_profile: object,
+    sample_analysis_intent: object,
+) -> None:
     _ = set_llm_env
 
     mock_llm = MagicMock()
@@ -187,7 +200,7 @@ def test_report_gen_node_llm_error(set_llm_env: None, sample_data_profile: objec
         user_requirement="Why?",
         data_profile=sample_data_profile,
         cleaning_insights="CI",
-        business_plan="BP",
+        analysis_intent=sample_analysis_intent,
         execution_plan="EP",
     )
 

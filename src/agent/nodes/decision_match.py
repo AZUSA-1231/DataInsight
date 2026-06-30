@@ -9,12 +9,13 @@ logger = logging.getLogger(__name__)
 
 
 def _build_decision_prompt(
-    data_profile_json: str, cleaning_insights: str, business_plan: str
+    data_profile_json: str, cleaning_insights: str, analysis_intent_json: str
 ) -> str:
     return f"""You are a data-analysis architect. Your job is to bridge business goals with
 data reality. You receive a structured Data Profile (columns, types, statistics),
-Cleaning Insights (quality issues found), and a Business Analysis Blueprint
-(what the business wants). Your output is a concrete, prioritized Execution Plan.
+Cleaning Insights (quality issues found), and a structured Analysis Intent
+(the user's analytical goal in JSON). Your output is a concrete, prioritized
+Execution Plan.
 
 CRITICAL RULES:
 1. NEVER invent columns that do not appear in the Data Profile.
@@ -29,13 +30,13 @@ Report structure (use exactly these headings in Chinese):
 ## 分析执行计划
 
 ### 1. 指标可行性映射
-For each metric in the Business Analysis Blueprint:
+For each dimension and target in the Analysis Intent:
 - Which column(s) from the Data Profile can compute it?
 - Feasibility: **[可直接实现]** / **[需清洗后实现]** / **[需替代方案]** / **[不可实现]**
 - Confidence: High / Medium / Low
 
 ### 2. 数据缺口与替代方案
-- Business metrics that have NO matching data column → flag as gap
+- Intent dimensions that have NO matching data column → flag as gap
 - Proposed alternative: what is the closest approximation we CAN compute?
 - If a gap is a showstopper, say so explicitly.
 
@@ -74,22 +75,22 @@ This section is MANDATORY. Explicitly state:
 
 ---
 
-**BUSINESS ANALYSIS BLUEPRINT:**
+**ANALYSIS INTENT (JSON):**
 
-{business_plan}
+{analysis_intent_json}
 """
 
 
 def _build_decision_prompt_with_feedback(
     data_profile_json: str,
     cleaning_insights: str,
-    business_plan: str,
+    analysis_intent_json: str,
     previous_execution_plan: str,
     feedback: str,
 ) -> str:
     return f"""You are a data-analysis architect. The user has reviewed a previous analysis
 report and provided FEEDBACK. Your job is to REVISE the execution plan to address
-the feedback, while staying grounded in the data profile and business blueprint.
+the feedback, while staying grounded in the data profile and analysis intent.
 
 USER FEEDBACK:
 {feedback}
@@ -133,38 +134,37 @@ Report structure (same as before, use exactly these headings in Chinese):
 
 ---
 
-**BUSINESS ANALYSIS BLUEPRINT:**
+**ANALYSIS INTENT (JSON):**
 
-{business_plan}
+{analysis_intent_json}
 """
 
 
 def decision_match_node(state: AgentState) -> dict[str, object]:
-    """Stage 2 — Decision Match (Planner): align ideal metrics with available data,
-    produce execution plan. Supports feedback-driven revision.
+    """Stage 2 — Decision Match (Planner): align structured analysis intent with
+    available data, produce execution plan. Supports feedback-driven revision.
 
-    Reads: state.data_profile, state.cleaning_insights, state.business_plan,
+    Reads: state.data_profile, state.cleaning_insights, state.analysis_intent,
            state.feedback, state.execution_plan
     Writes: state.execution_plan
     Consumes: state.feedback
     """
     data_profile = state.data_profile
     cleaning_insights = state.cleaning_insights
-    business_plan = state.business_plan
+    analysis_intent = state.analysis_intent
     feedback = state.feedback
 
     if not data_profile:
         logger.error("Decision Match: data_profile is missing from state")
         return {"error": "Decision Match: data_profile not available (Data Track may have failed)"}
 
-    if not business_plan:
-        logger.error("Decision Match: business_plan is missing from state")
-        return {
-            "error": "Decision Match: business_plan not available (Business Track may have failed)"
-        }
+    if not analysis_intent:
+        logger.error("Decision Match: analysis_intent is missing from state")
+        return {"error": "Decision Match: analysis_intent missing (Business Track may have failed)"}
 
     data_profile_json = data_profile.model_dump_json(indent=2)
     insights_text = cleaning_insights or ""
+    intent_json = analysis_intent.model_dump_json(indent=2)
 
     if feedback:
         logger.info(
@@ -172,15 +172,15 @@ def decision_match_node(state: AgentState) -> dict[str, object]:
         )
         previous_plan = state.execution_plan or ""
         prompt = _build_decision_prompt_with_feedback(
-            data_profile_json, insights_text, business_plan, previous_plan, feedback
+            data_profile_json, insights_text, intent_json, previous_plan, feedback
         )
     else:
         logger.info(
-            "Decision Match: aligning (profile=%d cols, business_plan=%d chars)",
+            "Decision Match: aligning (profile=%d cols, intent=%s)",
             len(data_profile.columns),
-            len(business_plan),
+            analysis_intent.analysis_type,
         )
-        prompt = _build_decision_prompt(data_profile_json, insights_text, business_plan)
+        prompt = _build_decision_prompt(data_profile_json, insights_text, intent_json)
 
     try:
         llm = get_llm(temperature=0)

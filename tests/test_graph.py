@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import contextlib
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.agent.graph import _should_iterate, _should_retry_execution, build_graph
-from src.agent.state import AgentState
+from src.agent.state import AgentState, AnalysisIntent
+
+_INTENT_JSON = json.dumps(
+    {
+        "core_question": "Test requirement",
+        "target_variable": None,
+        "analysis_type": "diagnostic",
+        "dimensions": ["time period"],
+        "comparison_baseline": None,
+    }
+)
 
 
 @pytest.mark.unit
@@ -36,7 +47,7 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
     mock_dt.invoke.return_value = MagicMock(content="## 数据清洗建议\n\nCleaning insights.")
 
     mock_bt = MagicMock()
-    mock_bt.invoke.return_value = MagicMock(content="## 业务分析蓝图\n\nBusiness plan.")
+    mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(content="## 分析执行计划\n\nExecution plan.")
@@ -93,7 +104,7 @@ def test_graph_m2_full_pipeline(sample_csv_path: str, set_llm_env: None) -> None
 
     mock_bt = MagicMock()
     mock_bt_response = MagicMock()
-    mock_bt_response.content = "## 业务分析蓝图\n\nBusiness plan."
+    mock_bt_response.content = _INTENT_JSON
     mock_bt.invoke.return_value = mock_bt_response
 
     mock_dm = MagicMock()
@@ -124,10 +135,11 @@ def test_graph_m2_full_pipeline(sample_csv_path: str, set_llm_env: None) -> None
 
     assert state.data_profile is not None
     assert state.cleaning_insights is not None
-    assert state.business_plan is not None
+    assert state.analysis_intent is not None
     assert state.execution_plan is not None
     assert "数据清洗建议" in (state.cleaning_insights or "")
-    assert "业务分析蓝图" in (state.business_plan or "")
+    assert isinstance(state.analysis_intent, AnalysisIntent)
+    assert state.analysis_intent.analysis_type == "diagnostic"
     assert "分析执行计划" in (state.execution_plan or "")
     assert "数据与业务对齐备忘" in (state.execution_plan or "")
     assert state.error is None
@@ -150,7 +162,7 @@ def test_graph_m3_execution_integration(
     mock_dt.invoke.return_value = MagicMock(content="## 数据清洗建议\n\nClean.")
 
     mock_bt = MagicMock()
-    mock_bt.invoke.return_value = MagicMock(content="## 业务分析蓝图\n\nBusiness plan.")
+    mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(content="## 分析执行计划\n\nAlign.")
@@ -191,7 +203,7 @@ def test_graph_m3_execution_integration(
         state = AgentState(**(state.model_dump() | ex_update))
 
     assert state.data_profile is not None
-    assert state.business_plan is not None
+    assert state.analysis_intent is not None
     assert state.execution_plan is not None
     assert state.execution_result is not None
     assert state.error is None
@@ -254,7 +266,7 @@ def test_graph_m4_full_pipeline(
     mock_dt.invoke.return_value = MagicMock(content="## 数据清洗建议\n\nClean.")
 
     mock_bt = MagicMock()
-    mock_bt.invoke.return_value = MagicMock(content="## 业务分析蓝图\n\nPlan.")
+    mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(content="## 分析执行计划\n\nAlign.")
@@ -311,6 +323,7 @@ def test_graph_feedback_iteration(
     set_llm_env: None,
     sample_execution_result: dict,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
     """Feedback loop: user feedback → decision_match revises → report_gen regenerates."""
     _ = set_llm_env
@@ -325,7 +338,7 @@ def test_graph_feedback_iteration(
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\nClean.",
-        business_plan="## 业务分析蓝图\nPlan.",
+        analysis_intent=sample_analysis_intent,
         execution_plan="## 分析执行计划\nOld plan.",
         execution_result=sample_execution_result,
         feedback="The chart on regional sales is wrong, use monthly data instead.",
