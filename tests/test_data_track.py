@@ -5,31 +5,104 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent.nodes.data_track import _build_audit_prompt, data_track_node
-from src.agent.state import AgentState
+from src.agent.nodes.data_track import (
+    _build_cleaning_insights_prompt,
+    _parse_data_profile,
+    data_track_node,
+)
+from src.agent.state import AgentState, ColumnProfile, DataProfile
+
+
+def _make_minimal_profile() -> DataProfile:
+    return DataProfile(
+        file_path="/tmp/test.csv",
+        shape=(10, 3),
+        columns=[
+            ColumnProfile(
+                name="sales",
+                dtype="float64",
+                null_count=2,
+                null_pct=20.0,
+                unique_count=8,
+                unique_pct=80.0,
+            ),
+            ColumnProfile(
+                name="region",
+                dtype="object",
+                null_count=3,
+                null_pct=30.0,
+                unique_count=3,
+                unique_pct=30.0,
+            ),
+        ],
+        statistics={},
+        head_sample=[{"sales": 100, "region": "East"}],
+    )
 
 
 @pytest.mark.unit
-def test_build_audit_prompt_structure() -> None:
-    inspection = json.dumps({"shape": {"rows": 10, "cols": 3}})
-    prompt = _build_audit_prompt(inspection)
+def test_parse_data_profile() -> None:
+    inspection = json.dumps(
+        {
+            "file_path": "/tmp/data.csv",
+            "shape": {"rows": 50, "cols": 2},
+            "columns": [
+                {
+                    "name": "col_a",
+                    "dtype": "int64",
+                    "null_count": 0,
+                    "null_pct": 0.0,
+                    "unique_count": 50,
+                    "unique_pct": 100.0,
+                },
+                {
+                    "name": "col_b",
+                    "dtype": "object",
+                    "null_count": 5,
+                    "null_pct": 10.0,
+                    "unique_count": 10,
+                    "unique_pct": 20.0,
+                },
+            ],
+            "statistics": {"col_a": {"mean": 42}},
+            "head": [{"col_a": 1, "col_b": "x"}],
+            "encoding": "utf-8",
+        }
+    )
 
-    assert "数据技术盘报告" in prompt
-    assert "字段总览" in prompt
-    assert "缺失值诊断" in prompt
-    assert "异常值隐患" in prompt
-    assert "需强清洗字段清单" in prompt
-    assert "整体数据质量评分" in prompt
-    assert inspection in prompt
+    profile = _parse_data_profile(inspection)
+
+    assert profile.file_path == "/tmp/data.csv"
+    assert profile.shape == (50, 2)
+    assert len(profile.columns) == 2
+    assert profile.columns[0].name == "col_a"
+    assert profile.columns[0].dtype == "int64"
+    assert profile.columns[0].null_count == 0
+    assert profile.columns[1].null_pct == 10.0
+    assert profile.encoding == "utf-8"
+    assert profile.statistics == {"col_a": {"mean": 42}}
+    assert profile.head_sample == [{"col_a": 1, "col_b": "x"}]
 
 
 @pytest.mark.unit
-def test_build_audit_prompt_excludes_business_analysis() -> None:
-    prompt = _build_audit_prompt("{}")
+def test_build_cleaning_insights_prompt_structure() -> None:
+    profile = _make_minimal_profile()
+    prompt = _build_cleaning_insights_prompt(profile)
 
-    # The prompt explicitly forbids business analysis — verify that instruction exists
+    assert "数据清洗建议" in prompt
+    assert "需强清洗字段" in prompt
+    assert "清洗策略" in prompt
+    assert "数据质量总评" in prompt
+    assert "sales" in prompt  # profile data embedded
+
+
+@pytest.mark.unit
+def test_build_cleaning_insights_prompt_excludes_business_analysis() -> None:
+    profile = _make_minimal_profile()
+    prompt = _build_cleaning_insights_prompt(profile)
+
     assert "do not suggest business metrics" in prompt.lower()
-    assert "do not recommend analysis methods" in prompt.lower()
+    assert "do not produce a full audit report" in prompt.lower()
     assert "stay in your lane" in prompt.lower()
 
 
@@ -39,35 +112,39 @@ def test_data_track_node_success(sample_csv_path: str, set_llm_env: None) -> Non
 
     mock_llm = MagicMock()
     mock_response = MagicMock()
-    mock_response.content = "# 数据技术盘报告\n\nTest audit report."
+    mock_response.content = "## 数据清洗建议\n\n清洗策略内容。"
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": sample_csv_path,
-        "user_requirement": "Analyze sales trend",
-    }
+    state = AgentState(
+        file_path=sample_csv_path,
+        user_requirement="Analyze sales trend",
+    )
 
     with patch("src.agent.nodes.data_track.get_llm", return_value=mock_llm):
         new_state = data_track_node(state)
 
-    assert "data_report" in new_state
+    assert "data_profile" in new_state
+    assert "cleaning_insights" in new_state
     assert "error" not in new_state
-    assert "数据技术盘报告" in new_state["data_report"]
+    assert isinstance(new_state["data_profile"], DataProfile)
+    assert new_state["data_profile"].shape[0] == 5  # 5 rows in sample CSV
+    assert "数据清洗建议" in new_state["cleaning_insights"]
     mock_llm.invoke.assert_called_once()
 
 
 @pytest.mark.unit
 def test_data_track_node_inspection_failure() -> None:
-    state: AgentState = {
-        "file_path": "/nonexistent/file.csv",
-        "user_requirement": "anything",
-    }
+    state = AgentState(
+        file_path="/nonexistent/file.csv",
+        user_requirement="anything",
+    )
 
     new_state = data_track_node(state)
 
     assert "error" in new_state
     assert new_state["error"] is not None
-    assert "data_report" not in new_state
+    assert "data_profile" not in new_state
+    assert "cleaning_insights" not in new_state
 
 
 @pytest.mark.unit
@@ -76,16 +153,16 @@ def test_data_track_node_preserves_state(sample_csv_path: str, set_llm_env: None
 
     mock_llm = MagicMock()
     mock_response = MagicMock()
-    mock_response.content = "Audit report content."
+    mock_response.content = "Cleaning insights content."
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": sample_csv_path,
-        "user_requirement": "Why did sales drop?",
-    }
+    state = AgentState(
+        file_path=sample_csv_path,
+        user_requirement="Why did sales drop?",
+    )
 
     with patch("src.agent.nodes.data_track.get_llm", return_value=mock_llm):
         new_state = data_track_node(state)
 
-    assert new_state["file_path"] == state["file_path"]
-    assert new_state["user_requirement"] == state["user_requirement"]
+    assert new_state["cleaning_insights"] == "Cleaning insights content."
+    assert isinstance(new_state["data_profile"], DataProfile)

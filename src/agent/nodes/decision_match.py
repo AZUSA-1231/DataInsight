@@ -8,18 +8,21 @@ from src.agent.state import AgentState
 logger = logging.getLogger(__name__)
 
 
-def _build_decision_prompt(data_report: str, business_plan: str) -> str:
+def _build_decision_prompt(
+    data_profile_json: str, cleaning_insights: str, business_plan: str
+) -> str:
     return f"""You are a data-analysis architect. Your job is to bridge business goals with
-data reality. You receive BOTH the Data Technical Audit Report (what the data
-actually looks like) and the Business Analysis Blueprint (what the business wants).
-Your output is a concrete, prioritized Execution Plan.
+data reality. You receive a structured Data Profile (columns, types, statistics),
+Cleaning Insights (quality issues found), and a Business Analysis Blueprint
+(what the business wants). Your output is a concrete, prioritized Execution Plan.
 
 CRITICAL RULES:
-1. NEVER invent columns that do not appear in the Data Technical Audit Report.
+1. NEVER invent columns that do not appear in the Data Profile.
 2. When a business metric cannot be computed from available data, you MUST flag it
    as **[不可实现]** and propose the closest feasible alternative.
 3. If a column flagged as **[严重缺失/建议禁用]** (>90% missing) appears essential
    to a core metric, flag it as **[阻塞]** and explain why the pipeline cannot proceed.
+4. Use the Cleaning Insights to prioritize preprocessing steps.
 
 Report structure (use exactly these headings in Chinese):
 
@@ -27,7 +30,7 @@ Report structure (use exactly these headings in Chinese):
 
 ### 1. 指标可行性映射
 For each metric in the Business Analysis Blueprint:
-- Which column(s) from the Data Audit can compute it?
+- Which column(s) from the Data Profile can compute it?
 - Feasibility: **[可直接实现]** / **[需清洗后实现]** / **[需替代方案]** / **[不可实现]**
 - Confidence: High / Medium / Low
 
@@ -37,7 +40,7 @@ For each metric in the Business Analysis Blueprint:
 - If a gap is a showstopper, say so explicitly.
 
 ### 3. 清洗优先级
-Based on the Data Audit's "需强清洗字段清单", rank cleaning actions by urgency:
+Based on the Cleaning Insights, rank cleaning actions by urgency:
 - **[阻断项]**: must clean before ANY analysis (e.g., >90% missing key column)
 - **[高优先]**: strongly affects result quality
 - **[低优先]**: cosmetic or optional
@@ -59,9 +62,15 @@ This section is MANDATORY. Explicitly state:
 
 ---
 
-**DATA TECHNICAL AUDIT REPORT:**
+**DATA PROFILE (JSON):**
 
-{data_report}
+{data_profile_json}
+
+---
+
+**CLEANING INSIGHTS:**
+
+{cleaning_insights}
 
 ---
 
@@ -72,14 +81,15 @@ This section is MANDATORY. Explicitly state:
 
 
 def _build_decision_prompt_with_feedback(
-    data_report: str,
+    data_profile_json: str,
+    cleaning_insights: str,
     business_plan: str,
     previous_execution_plan: str,
     feedback: str,
 ) -> str:
     return f"""You are a data-analysis architect. The user has reviewed a previous analysis
 report and provided FEEDBACK. Your job is to REVISE the execution plan to address
-the feedback, while staying grounded in the data audit and business blueprint.
+the feedback, while staying grounded in the data profile and business blueprint.
 
 USER FEEDBACK:
 {feedback}
@@ -111,9 +121,15 @@ Report structure (same as before, use exactly these headings in Chinese):
 
 ---
 
-**DATA TECHNICAL AUDIT REPORT:**
+**DATA PROFILE (JSON):**
 
-{data_report}
+{data_profile_json}
+
+---
+
+**CLEANING INSIGHTS:**
+
+{cleaning_insights}
 
 ---
 
@@ -123,62 +139,58 @@ Report structure (same as before, use exactly these headings in Chinese):
 """
 
 
-def decision_match_node(state: AgentState) -> AgentState:
-    """Stage 2 — Decision Match: align ideal metrics with available data, produce
-    execution plan. Supports feedback-driven revision.
+def decision_match_node(state: AgentState) -> dict[str, object]:
+    """Stage 2 — Decision Match (Planner): align ideal metrics with available data,
+    produce execution plan. Supports feedback-driven revision.
 
-    Reads: state["data_report"], state["business_plan"], state["feedback"],
-           state["execution_plan"]
-    Writes: state["execution_plan"]
-    Consumes: state["feedback"]
+    Reads: state.data_profile, state.cleaning_insights, state.business_plan,
+           state.feedback, state.execution_plan
+    Writes: state.execution_plan
+    Consumes: state.feedback
     """
-    data_report = state.get("data_report")
-    business_plan = state.get("business_plan")
-    feedback = state.get("feedback")
+    data_profile = state.data_profile
+    cleaning_insights = state.cleaning_insights
+    business_plan = state.business_plan
+    feedback = state.feedback
 
-    if not data_report:
-        logger.error("Decision Match: data_report is missing from state")
-        return {
-            **state,
-            "error": "Decision Match: data_report not available (Data Track may have failed)",
-        }
+    if not data_profile:
+        logger.error("Decision Match: data_profile is missing from state")
+        return {"error": "Decision Match: data_profile not available (Data Track may have failed)"}
 
     if not business_plan:
         logger.error("Decision Match: business_plan is missing from state")
         return {
-            **state,
-            "error": "Decision Match: business_plan not available (Business Track may have failed)",
+            "error": "Decision Match: business_plan not available (Business Track may have failed)"
         }
+
+    data_profile_json = data_profile.model_dump_json(indent=2)
+    insights_text = cleaning_insights or ""
 
     if feedback:
         logger.info(
-            "Decision Match: revising plan based on user feedback (%d chars)",
-            len(feedback),
+            "Decision Match: revising plan based on user feedback (%d chars)", len(feedback)
         )
-        previous_plan = state.get("execution_plan", "")
+        previous_plan = state.execution_plan or ""
         prompt = _build_decision_prompt_with_feedback(
-            data_report, business_plan, previous_plan, feedback
+            data_profile_json, insights_text, business_plan, previous_plan, feedback
         )
     else:
         logger.info(
-            "Decision Match: aligning (data_report=%d chars, business_plan=%d chars)",
-            len(data_report),
+            "Decision Match: aligning (profile=%d cols, business_plan=%d chars)",
+            len(data_profile.columns),
             len(business_plan),
         )
-        prompt = _build_decision_prompt(data_report, business_plan)
+        prompt = _build_decision_prompt(data_profile_json, insights_text, business_plan)
 
     try:
         llm = get_llm(temperature=0)
         response = llm.invoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
-        content = content if isinstance(content, str) else str(content)
+        content = str(content) if not isinstance(content, str) else content
     except Exception as e:
         logger.error("Decision Match: LLM call failed: %s", e)
-        return {**state, "error": f"Decision Match LLM error: {e}"}
+        return {"error": f"Decision Match LLM error: {e}"}
 
     logger.info("Decision Match: execution plan generated (%d chars)", len(content))
 
-    # Consume feedback so the iteration loop terminates
-    new_state = {**state, "execution_plan": content}
-    new_state.pop("feedback", None)
-    return new_state  # type: ignore[return-value]
+    return {"execution_plan": content, "feedback": None}

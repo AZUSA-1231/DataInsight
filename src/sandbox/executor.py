@@ -53,8 +53,7 @@ def run_script(
         stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
         return SandboxResult(
             stdout=stdout,
-            stderr=stderr
-            + f"\n[Sandbox] Process timed out after {timeout_seconds}s",
+            stderr=stderr + f"\n[Sandbox] Process timed out after {timeout_seconds}s",
             exit_code=-1,
             timed_out=True,
         )

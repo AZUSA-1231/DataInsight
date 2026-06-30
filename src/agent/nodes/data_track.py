@@ -5,7 +5,7 @@ import logging
 import os
 
 from src.agent.llm import get_llm
-from src.agent.state import AgentState
+from src.agent.state import AgentState, ColumnProfile, DataProfile
 from src.sandbox.executor import SandboxResult, run_script
 
 logger = logging.getLogger(__name__)
@@ -15,76 +15,100 @@ _INSPECTION_SCRIPT = os.path.join(
 )
 
 
-def _build_audit_prompt(inspection_json: str) -> str:
-    return f"""You are a strict data auditor. Your ONLY job is to analyze the raw
-structural metadata below and produce a 《Data Technical Audit Report》.
+def _parse_data_profile(inspection_json: str) -> DataProfile:
+    """Parse inspection script output into a structured DataProfile."""
+    raw = json.loads(inspection_json)
 
-DO NOT suggest business metrics, DO NOT recommend analysis methods, DO NOT
-mention the user's business question. You are the DATA track — stay in your lane.
+    columns = [
+        ColumnProfile(
+            name=col["name"],
+            dtype=col["dtype"],
+            null_count=col["null_count"],
+            null_pct=col["null_pct"],
+            unique_count=col["unique_count"],
+            unique_pct=col["unique_pct"],
+        )
+        for col in raw["columns"]
+    ]
 
-Report structure (use exactly these headings in Chinese):
+    return DataProfile(
+        file_path=raw["file_path"],
+        shape=(raw["shape"]["rows"], raw["shape"]["cols"]),
+        columns=columns,
+        statistics=raw.get("statistics", {}),
+        head_sample=raw.get("head", []),
+        encoding=raw.get("encoding"),
+    )
 
-## 数据技术盘报告
 
-### 1. 字段总览
-List every column with its dtype, null count, null percentage, and unique count.
-Flag columns with >30% missing as **[高缺失]** and columns with >90% missing
-as **[严重缺失/建议禁用]**.
+def _build_cleaning_insights_prompt(data_profile: DataProfile) -> str:
+    """Build a prompt asking the LLM for concise cleaning recommendations only."""
+    profile_json = data_profile.model_dump_json(indent=2)
+    return f"""You are a strict data quality specialist. Your ONLY job is to review the
+structured data profile below and produce concise, actionable cleaning recommendations.
 
-### 2. 缺失值诊断
-For each column with nulls:
-- How many missing? What percentage?
-- Is the column likely optional (e.g. many rows missing) or structural (few missing)?
-- Could zeros or empty strings be disguised missing values? Check if min is 0.
+DO NOT produce a full audit report. DO NOT suggest business metrics or analysis methods.
+You are the DATA track — stay in your lane.
 
-### 3. 异常值隐患
-- Columns where unique count is suspiciously low (potential categorical
-  masquerading as numeric)?
-- Outliers visible from descriptive statistics (mean vs 50% large gap)?
-- Any dtypes that look wrong (e.g. numeric stored as object)?
+Output structure (use exactly these headings in Chinese):
 
-### 4. 需强清洗字段清单
-List columns that MUST be cleaned before any analysis, with concrete action items:
-- Drop? Impute (mean/median/mode)? Leave as-is?
-- For each cleaning action, state the risk if NOT cleaned.
+## 数据清洗建议
 
-### 5. 整体数据质量评分
-Assign a grade (A/B/C/D/F) and one-sentence justification.
+### 1. 需强清洗字段
+For each column with data quality issues (high null%, wrong dtype, outliers):
+- Column name, what is wrong, and the specific cleaning action
+- Flag: **[高缺失]** (>30% null), **[严重缺失/建议禁用]** (>90% null), **[类型问题]** (wrong dtype)
+
+### 2. 清洗策略
+Concrete, ordered steps for preprocessing:
+- Drop columns/rows: which ones and under what threshold?
+- Impute missing values: which method (mean/median/mode/forward-fill) per column?
+- Type conversions: which columns need dtype fixes?
+- Encode categoricals: which columns and which method (one-hot/label)?
+
+### 3. 数据质量总评
+One grade (A/B/C/D/F) and one-sentence justification. Be brief.
 
 ---
+**DATA PROFILE (JSON):**
 
-**INSPECTION DATA (JSON):**
-
-{inspection_json}
+{profile_json}
 """
 
 
-def data_track_node(state: AgentState) -> AgentState:
-    """Stage 1 — Data Track: run deterministic inspection, produce audit report.
+def data_track_node(state: AgentState) -> dict[str, object]:
+    """Stage 1a — Data Track: deterministic inspection → structured profile,
+    then LLM produces concise cleaning insights.
 
-    Reads: state["file_path"], state["user_requirement"]
-    Writes: state["data_report"]
+    Reads: state.file_path
+    Writes: state.data_profile, state.cleaning_insights
     """
-    file_path = state["file_path"]
+    file_path = state.file_path
     logger.info("Data Track: inspecting %s", file_path)
 
     result: SandboxResult = run_script(_INSPECTION_SCRIPT, [file_path])
 
     if result.exit_code != 0:
         logger.error("Inspection script failed: %s", result.stderr)
-        return {**state, "error": f"Inspection script error: {result.stderr}"}
+        return {"error": f"Inspection script error: {result.stderr}"}
 
     try:
-        json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        logger.error("Inspection output is not valid JSON: %s", e)
-        return {**state, "error": f"Failed to parse inspection output: {e}"}
+        data_profile = _parse_data_profile(result.stdout)
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.error("Failed to parse inspection output: %s", e)
+        return {"error": f"Failed to parse inspection output: {e}"}
 
-    prompt = _build_audit_prompt(result.stdout)
+    logger.info(
+        "Data Track: profile parsed — %d columns, shape=%s",
+        len(data_profile.columns),
+        data_profile.shape,
+    )
+
+    prompt = _build_cleaning_insights_prompt(data_profile)
     llm = get_llm(temperature=0)
     response = llm.invoke(prompt)
     content = response.content if hasattr(response, "content") else str(response)
-    data_report = content if isinstance(content, str) else str(content)
+    cleaning_insights = str(content) if not isinstance(content, str) else content
 
-    logger.info("Data Track: report generated (%d chars)", len(data_report))
-    return {**state, "data_report": data_report}
+    logger.info("Data Track: cleaning insights generated (%d chars)", len(cleaning_insights))
+    return {"data_profile": data_profile, "cleaning_insights": cleaning_insights}

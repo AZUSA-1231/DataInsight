@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -20,6 +20,7 @@ from src.agent.graph import build_graph
 from src.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
+
 
 def _check_prerequisites(args: argparse.Namespace) -> None:
     """Fail fast with a clear message before invoking the expensive graph."""
@@ -110,28 +111,34 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
 
     artifacts: list[tuple[str, str]] = []
 
-    if state.get("data_report"):
-        artifacts.append(("data_report.md", state["data_report"]))
-    if state.get("business_plan"):
-        artifacts.append(("business_plan.md", state["business_plan"]))
-    if state.get("execution_plan"):
-        artifacts.append(("execution_plan.md", state["execution_plan"]))
+    if state.data_profile:
+        artifacts.append(
+            (
+                "data_profile.json",
+                _json.dumps(state.data_profile.model_dump(), ensure_ascii=False, indent=2),
+            )
+        )
+    if state.cleaning_insights:
+        artifacts.append(("cleaning_insights.md", state.cleaning_insights))
+    if state.business_plan:
+        artifacts.append(("business_plan.md", state.business_plan))
+    if state.execution_plan:
+        artifacts.append(("execution_plan.md", state.execution_plan))
 
-    exec_result = state.get("execution_result", {})
+    exec_result = state.execution_result or {}
     if exec_result:
-        # Save parsed output as JSON
         if "parsed_output" in exec_result:
             artifacts.append(
-                ("execution_result.json",
-                 _json.dumps(exec_result["parsed_output"], ensure_ascii=False, indent=2))
+                (
+                    "execution_result.json",
+                    _json.dumps(exec_result["parsed_output"], ensure_ascii=False, indent=2),
+                )
             )
-        # Save generated scripts from attempts
         for i, attempt in enumerate(exec_result.get("attempts", [])):
             code = attempt.get("code", "")
             err = attempt.get("error", "")
             content = f"# Attempt {i + 1}\n# Error: {err}\n\n{code}" if code else err
             artifacts.append((f"script_attempt_{i + 1}.py", content))
-        # Save final successful script
         if "script_path" in exec_result:
             script_path = exec_result["script_path"]
             if os.path.exists(script_path):
@@ -140,15 +147,13 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
                         artifacts.append(("final_script.py", src_f.read()))
                 except OSError:
                     pass
-        # Save raw stdout
         if "stdout" in exec_result:
             artifacts.append(("execution_stdout.txt", exec_result["stdout"]))
 
-    if state.get("error"):
-        artifacts.append(("error.txt", state["error"]))
+    if state.error:
+        artifacts.append(("error.txt", state.error))
 
     # Copy chart images from sandbox output_dir to intermediates
-    exec_result = state.get("execution_result", {})
     charts_src_dir = exec_result.get("output_dir", "")
     if charts_src_dir and os.path.isdir(charts_src_dir):
         import shutil as _shutil
@@ -182,7 +187,7 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
 
 
 _STAGE_LABELS: dict[str, str] = {
-    "data_track": "Stage 1a — Data Audit",
+    "data_track": "Stage 1a — Data Profile",
     "business_track": "Stage 1b — Business Analysis",
     "decision_match": "Stage 2  — Data-Business Alignment",
     "execution": "Stage 3  — Sandbox Execution",
@@ -195,7 +200,7 @@ def _run_graph(
 ) -> AgentState:
     """Run the graph with streaming progress display."""
     seen: set[str] = set()
-    state_out: dict[str, Any] = dict(state)
+    state_out = state.model_dump()
 
     for chunk in graph.stream(state, stream_mode="updates"):
         for node_name in chunk:
@@ -208,7 +213,7 @@ def _run_graph(
             if isinstance(chunk[node_name], dict):
                 state_out = {**state_out, **chunk[node_name]}
 
-    return cast(AgentState, state_out)
+    return AgentState(**state_out)
 
 
 def main() -> None:
@@ -226,10 +231,10 @@ def main() -> None:
 
     graph = build_graph()
 
-    state: AgentState = {
-        "file_path": args.file_path,
-        "user_requirement": args.requirement,
-    }
+    state = AgentState(
+        file_path=args.file_path,
+        user_requirement=args.requirement,
+    )
 
     print(f"\nDataInsight analyzing: {args.file_path}")
     print(f"Requirement: {args.requirement}")
@@ -242,7 +247,7 @@ def main() -> None:
         print(f"\n[FATAL] Pipeline failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    report = state.get("final_report", "")
+    report = state.final_report
     if report:
         _print_report(report)
         try:
@@ -252,7 +257,7 @@ def main() -> None:
         except OSError as e:
             print(f"\n[WARNING] Could not save report: {e}", file=sys.stderr)
     else:
-        error = state.get("error", "Unknown error")
+        error = state.error or "Unknown error"
         print(f"\n[ERROR] Report generation failed: {error}", file=sys.stderr)
 
     if args.save_intermediates:
@@ -272,7 +277,7 @@ def main() -> None:
             break
 
         print("Revising analysis based on feedback...\n")
-        state["feedback"] = feedback
+        state = state.model_copy(update={"feedback": feedback})
 
         try:
             state = _run_graph(state, graph)
@@ -280,7 +285,7 @@ def main() -> None:
             print(f"\n[FATAL] Iteration failed: {e}", file=sys.stderr)
             sys.exit(1)
 
-        report = state.get("final_report", "")
+        report = state.final_report
         if report:
             _print_report(report)
             output_path = output_path.replace(".md", "_revised.md")
@@ -291,7 +296,7 @@ def main() -> None:
             except OSError as e:
                 print(f"\n[WARNING] Could not save report: {e}", file=sys.stderr)
         else:
-            error = state.get("error", "Unknown error")
+            error = state.error or "Unknown error"
             print(f"\n[ERROR] Report revision failed: {error}", file=sys.stderr)
 
         if args.save_intermediates:

@@ -68,26 +68,23 @@ def test_build_react_fix_prompt_includes_error() -> None:
 
 @pytest.mark.unit
 def test_execution_node_missing_execution_plan() -> None:
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze sales",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+    )
 
     new_state = execution_node(state)
 
     assert "error" in new_state
     assert "execution_plan" in new_state["error"]
-    # Should set retry_count=3 to prevent infinite ReAct loop on permanent error
     assert new_state["execution_result"]["retry_count"] == 3
 
 
 @pytest.mark.unit
-def test_execution_node_success_first_attempt(
-    set_llm_env: None, temp_output_dir: str
-) -> None:
+def test_execution_node_success_first_attempt(set_llm_env: None, temp_output_dir: str) -> None:
     _ = set_llm_env
 
-    valid_script = "import sys; print('{\"cleaned_shape\": {\"rows\": 100, \"cols\": 5}}')"
+    valid_script = 'import sys; print(\'{"cleaned_shape": {"rows": 100, "cols": 5}}\')'
     sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 100, "cols": 5}}',
         stderr="",
@@ -100,11 +97,11 @@ def test_execution_node_success_first_attempt(
     mock_response.content = valid_script
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze sales",
-        "execution_plan": "## 分析执行计划\nClean data.",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+        execution_plan="## 分析执行计划\nClean data.",
+    )
 
     with (
         patch("src.agent.nodes.execution.get_llm", return_value=mock_llm),
@@ -112,7 +109,7 @@ def test_execution_node_success_first_attempt(
     ):
         new_state = execution_node(state)
 
-    assert "error" not in new_state
+    assert new_state.get("error") is None
     assert "execution_result" in new_state
     result = new_state["execution_result"]
     assert result["retry_count"] == 0
@@ -138,11 +135,11 @@ def test_execution_node_sandbox_error_triggers_retry(
     mock_response.content = "print(df.column)\n"
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze sales",
-        "execution_plan": "## 分析执行计划\nUse column 'sales'.",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+        execution_plan="## 分析执行计划\nUse column 'sales'.",
+    )
 
     with (
         patch("src.agent.nodes.execution.get_llm", return_value=mock_llm),
@@ -159,9 +156,7 @@ def test_execution_node_sandbox_error_triggers_retry(
 
 
 @pytest.mark.unit
-def test_execution_node_react_retry_then_success(
-    set_llm_env: None, temp_output_dir: str
-) -> None:
+def test_execution_node_react_retry_then_success(set_llm_env: None, temp_output_dir: str) -> None:
     """Simulate what the graph does: first call fails, second call (ReAct) succeeds."""
     _ = set_llm_env
 
@@ -175,20 +170,28 @@ def test_execution_node_react_retry_then_success(
     mock_response.content = "print(df['sales_col'])\n"
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze sales",
-        "execution_plan": "## 分析执行计划\nUse 'revenue' column.",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+        execution_plan="## 分析执行计划\nUse 'revenue' column.",
+    )
 
     with (
         patch("src.agent.nodes.execution.get_llm", return_value=mock_llm),
         patch("src.agent.nodes.execution.run_script", return_value=fail_result),
     ):
-        state = execution_node(state)
+        state_dict = execution_node(state)
 
-    assert "error" in state
-    assert state["execution_result"]["retry_count"] == 1
+    assert "error" in state_dict
+    assert state_dict["execution_result"]["retry_count"] == 1
+
+    # Reconstruct state for second attempt
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+        execution_plan="## 分析执行计划\nUse 'revenue' column.",
+        execution_result=state_dict["execution_result"],
+    )
 
     # --- Second attempt: ReAct fix succeeds ---
     fix_result = SandboxResult(
@@ -207,19 +210,17 @@ def test_execution_node_react_retry_then_success(
         patch("src.agent.nodes.execution.get_llm", return_value=mock_llm2),
         patch("src.agent.nodes.execution.run_script", return_value=fix_result),
     ):
-        state = execution_node(state)
+        state_dict2 = execution_node(state)
 
-    assert "error" not in state
-    exec_result = state["execution_result"]
+    assert state_dict2.get("error") is None
+    exec_result = state_dict2["execution_result"]
     assert exec_result["parsed_output"]["cleaned_shape"]["rows"] == 50
     assert len(exec_result["attempts"]) == 1  # prior failure recorded
     assert exec_result["retry_count"] == 1
 
 
 @pytest.mark.unit
-def test_execution_node_timeout_handling(
-    set_llm_env: None, temp_output_dir: str
-) -> None:
+def test_execution_node_timeout_handling(set_llm_env: None, temp_output_dir: str) -> None:
     _ = set_llm_env
 
     timeout_result = SandboxResult(
@@ -234,11 +235,11 @@ def test_execution_node_timeout_handling(
     mock_response.content = "while True: pass\n"
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze sales",
-        "execution_plan": "Plan here.",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+        execution_plan="Plan here.",
+    )
 
     with (
         patch("src.agent.nodes.execution.get_llm", return_value=mock_llm),
@@ -252,12 +253,9 @@ def test_execution_node_timeout_handling(
 
 
 @pytest.mark.unit
-def test_execution_node_invalid_json_output(
-    set_llm_env: None, temp_output_dir: str
-) -> None:
+def test_execution_node_invalid_json_output(set_llm_env: None, temp_output_dir: str) -> None:
     _ = set_llm_env
 
-    # Script runs but prints garbage instead of JSON
     bad_result = SandboxResult(
         stdout="Here is some analysis text\nbut no valid JSON!",
         stderr="",
@@ -270,11 +268,11 @@ def test_execution_node_invalid_json_output(
     mock_response.content = "print('not json')\n"
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze",
-        "execution_plan": "Plan.",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze",
+        execution_plan="Plan.",
+    )
 
     with (
         patch("src.agent.nodes.execution.get_llm", return_value=mock_llm),
@@ -289,7 +287,9 @@ def test_execution_node_invalid_json_output(
 
 @pytest.mark.unit
 def test_execution_node_preserves_state(
-    set_llm_env: None, temp_output_dir: str
+    set_llm_env: None,
+    temp_output_dir: str,
+    sample_data_profile: object,
 ) -> None:
     _ = set_llm_env
 
@@ -305,13 +305,14 @@ def test_execution_node_preserves_state(
     mock_response.content = "print('{}')\n"
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Why did sales drop?",
-        "data_report": "## 数据技术盘报告\nExisting audit.",
-        "business_plan": "## 业务分析蓝图\nExisting plan.",
-        "execution_plan": "## 分析执行计划\nExecute this.",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Why did sales drop?",
+        data_profile=sample_data_profile,
+        cleaning_insights="## 数据清洗建议\nExisting insights.",
+        business_plan="## 业务分析蓝图\nExisting plan.",
+        execution_plan="## 分析执行计划\nExecute this.",
+    )
 
     with (
         patch("src.agent.nodes.execution.get_llm", return_value=mock_llm),
@@ -319,11 +320,8 @@ def test_execution_node_preserves_state(
     ):
         new_state = execution_node(state)
 
-    assert new_state["file_path"] == state["file_path"]
-    assert new_state["user_requirement"] == state["user_requirement"]
-    assert new_state["data_report"] == state["data_report"]
-    assert new_state["business_plan"] == state["business_plan"]
-    assert new_state["execution_plan"] == state["execution_plan"]
+    assert "execution_result" in new_state
+    assert new_state["execution_result"]["parsed_output"]["cleaned_shape"]["rows"] == 10
 
 
 @pytest.mark.unit
@@ -333,11 +331,11 @@ def test_execution_node_llm_error(set_llm_env: None) -> None:
     mock_llm = MagicMock()
     mock_llm.invoke.side_effect = RuntimeError("API rate limit")
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze",
-        "execution_plan": "Plan.",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze",
+        execution_plan="Plan.",
+    )
 
     with patch("src.agent.nodes.execution.get_llm", return_value=mock_llm):
         new_state = execution_node(state)

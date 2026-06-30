@@ -15,6 +15,8 @@ Non-technical users (business analysts, students, developers unskilled in data e
 
 ## Hypothesis
 We believe **a LangGraph-based state machine that enforces a four-stage pipeline — Parallel Dual-Track Assessment → Alignment & Trade-off → Sandbox Execution → Report Assembly** — will **enable non-technical users to produce defensible analysis reports in a single session**.
+
+V2 refines this hypothesis: the MVP's LLM-generated audit reports were verbose and inconsistent; business plans drifted into irrelevant metrics. By replacing free-text intermediate artifacts with structured Pydantic models (`DataProfile`, `AnalysisIntent`, `ExecutionPlan`) and splitting the monolithic execution node into independent preprocessing + analysis stages with dedicated ReAct loops, we expect **fewer hallucinated data claims, tighter alignment between business questions and analysis output, and cleaner final reports that do not stitch raw intermediate artifacts**.
 We'll know we're right when **≥80% of first-time analysis requests produce a valid report without human correction of data logic errors (cosmetic chart adjustments excluded)**.
 
 ## Success Metrics
@@ -46,6 +48,7 @@ We'll know we're right when **≥80% of first-time analysis requests produce a v
 | 2 | Business Track + Decision Match node | Parallel dual-track complete → receives an *Analysis Execution Plan* | complete | [plan](../plans/data-insight-agent-m2.plan.md) |
 | 3 | Sandbox execution + ReAct self-correction loop | Code runs successfully in sandbox, producing cleaned data + charts | complete | [plan](../plans/data-insight-agent-m3.plan.md) |
 | 4 | Report assembly + in-session iteration | Full Markdown report delivered; user can request revisions within the session | complete | [plan](../plans/data-insight-agent-m4.plan.md) |
+| 5 | V2 Agent Architecture Refactor | Pydantic migration, parallel tracks, intent parser, planner with model selection, split execution, clean reports | in-progress | [plan](../plans/data-insight-agent-v2.plan.md) |
 
 ## Open Questions
 - [ ] What is the CSV/Excel file size ceiling? How are sandbox memory limits defined?
@@ -64,4 +67,4 @@ We'll know we're right when **≥80% of first-time analysis requests produce a v
 | User expects "one-click magic" but agent enforces a deliberate multi-stage process | Low | Medium — user may perceive the flow as slow | Real-time stage progress feedback so the user understands the value of each phase |
 
 ---
-*Status: DRAFT — requirements only. Implementation planning pending via /plan.*
+*Status: LIVING — updated continuously as the project evolves.*

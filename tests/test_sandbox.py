@@ -10,9 +10,7 @@ from src.sandbox.inspection_script import run as inspection_run
 
 @pytest.mark.unit
 def test_run_script_success(sample_csv_path: str) -> None:
-    result = run_script(
-        "src/sandbox/inspection_script.py", [sample_csv_path]
-    )
+    result = run_script("src/sandbox/inspection_script.py", [sample_csv_path])
 
     assert result.exit_code == 0
     assert not result.timed_out
@@ -35,9 +33,7 @@ def test_run_script_timeout() -> None:
 
 @pytest.mark.unit
 def test_run_script_file_not_found() -> None:
-    result = run_script(
-        "src/sandbox/inspection_script.py", ["/nonexistent/file.csv"]
-    )
+    result = run_script("src/sandbox/inspection_script.py", ["/nonexistent/file.csv"])
 
     assert result.exit_code != 0
     assert len(result.stderr) > 0

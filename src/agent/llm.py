@@ -50,8 +50,10 @@ def get_llm(temperature: float | None = None) -> BaseChatModel:
     model = os.environ.get("DATAINSIGHT_LLM_MODEL")
     api_key = os.environ.get("DATAINSIGHT_LLM_API_KEY")
     base_url = os.environ.get("DATAINSIGHT_LLM_BASE_URL")
-    temp = temperature if temperature is not None else float(
-        os.environ.get("DATAINSIGHT_LLM_TEMPERATURE", "0")
+    temp = (
+        temperature
+        if temperature is not None
+        else float(os.environ.get("DATAINSIGHT_LLM_TEMPERATURE", "0"))
     )
 
     missing: list[str] = []

@@ -367,4 +367,94 @@ No python-dotenv dependency needed.
 X" error messages.
 
 ---
-*Last updated: post-MVP hardening complete. 52 tests passing, all validation clean.*
+
+## D21 — V2: Pydantic replaces TypedDict for AgentState
+
+**Date**: V2 | **Scope**: [src/agent/state.py](src/agent/state.py)
+
+AgentState moves from `typing.TypedDict` to `pydantic.BaseModel` for runtime
+type validation. D1 (TypedDict choice) was correct for MVP but led to multiple
+bugs where nodes wrote incorrect field types that mypy couldn't catch at runtime.
+
+**Trade-off**: Pydantic adds a dependency (already pulled in by langchain).
+`model_copy(update={...})` replaces `{**state, "k": v}` syntax.
+
+**Migration strategy**: Phase 0 — change the container only, keep existing fields.
+SubModels (DataProfile, AnalysisIntent, ExecutionPlan) added in subsequent phases.
+
+---
+
+## D22 — V2: Data Track output split into DataProfile + cleaning_insights
+
+**Date**: V2 | **Scope**: [src/agent/nodes/data_track.py](src/agent/nodes/data_track.py)
+
+The inspection JSON is now parsed into a structured `DataProfile` Pydantic model
+(no LLM involvement). The LLM only produces `cleaning_insights` — a concise
+cleaning/preprocessing recommendation — instead of a verbose 5-section audit report.
+
+**Why**: The original audit report was a human-readable translation of structured
+data the machine already had. Other nodes need the structured form, not prose.
+
+---
+
+## D23 — V2: Business Track narrowed to intent understanding
+
+**Date**: V2 | **Scope**: [src/agent/nodes/business_track.py](src/agent/nodes/business_track.py)
+
+Business Track is re-scoped from "business analysis blueprint" (5 sections of free-form
+Chinese text) to an intent parser that outputs structured `AnalysisIntent` JSON.
+
+**Why**: Without data visibility, the original Business Track frequently proposed
+metrics that were impossible to compute, confusing downstream nodes. Narrowing it
+to intent extraction reduces hallucination surface.
+
+---
+
+## D24 — V2: Decision Match upgraded to Planner (with model selection)
+
+**Date**: V2 | **Scope**: [src/agent/nodes/decision_match.py](src/agent/nodes/decision_match.py)
+
+Decision Match is redesigned as a Planner that:
+- Maps every business metric to available data columns with feasibility tags
+- Selects analysis models/methods with explicit reasoning chains
+- Produces structured `ExecutionPlan` with separate preprocessing_steps and analysis_steps
+- Maintains mandatory alignment_notes
+
+**Why**: MVP Decision Match was essentially a summarizer of two reports. The Planner
+is the intelligence layer — it makes the hard trade-off decisions that define the
+quality of downstream execution.
+
+---
+
+## D25 — V2: Execution split into preprocessing + analysis
+
+**Date**: V2 | **Scope**: [src/agent/nodes/preprocessing.py](src/agent/nodes/preprocessing.py), [src/agent/nodes/analysis.py](src/agent/nodes/analysis.py)
+
+The single execution node is split into two graph nodes:
+1. **preprocessing** — data cleaning (type conversion, null handling, encoding)
+2. **analysis** — EDA, modeling, chart generation
+
+Each has its own ReAct retry loop (max 3). Preprocessing success is checkpointed
+so analysis retries don't re-run cleaning.
+
+**Why**: Single-script generation had low success rate (LLM must write correct
+cleaning + analysis + charting in one shot). Splitting reduces per-prompt
+complexity and prevents re-running expensive cleaning on analysis failures.
+
+---
+
+## D26 — V2: True parallel dual-track (Send API)
+
+**Date**: V2 | **Scope**: [src/agent/graph.py](src/agent/graph.py)
+
+D11 documented the sequential simplification. V2 upgrades to true parallelism:
+`START → data_track` and `START → business_track` run concurrently, both fanning
+into decision_match. LangGraph waits for both before invoking decision_match.
+
+**Why**: The two tracks are genuinely independent (data track reads the file,
+business track reads only the user requirement). Parallelism saves wall-clock
+time proportional to the slower of the two LLM calls.
+
+---
+
+*Last updated: V2 Phase 0 starting. D21-D26 decisions documented.*

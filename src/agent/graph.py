@@ -14,29 +14,45 @@ from src.agent.state import AgentState
 
 
 def _should_retry_execution(state: AgentState) -> Literal["execution", "report_gen"]:
-    if state.get("error") and state.get("execution_result", {}).get("retry_count", 0) < 3:
+    retry_count = (state.execution_result or {}).get("retry_count", 0)
+    if state.error and retry_count < 3:
         return "execution"
     return "report_gen"
 
 
 def _should_iterate(state: AgentState) -> Literal["decision_match", "__end__"]:
     """Route back to decision_match if user feedback is present (in-session iteration)."""
-    if state.get("feedback"):
+    if state.feedback:
         return "decision_match"
     return "__end__"
 
 
 def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
-    """Construct the four-stage DataInsight analysis state machine.
+    """Construct the DataInsight analysis state machine.
 
     Flow:
-        START -> data_track -> business_track -> decision_match
-              -> execution -> report_gen -> END
-                 ^              |            ^
-                 |--(on error)--/            |
-                 |--(user feedback)----------/
+                    START
+                   /      \\
+                  v        v
+          data_track    business_track
+                  \\      /
+                   v    v
+              decision_match
+                   |
+                   v
+              execution
+                /     \\
+        (success)   (error → ReAct × 3)
+              /         \\
+             v           v
+        report_gen   report_gen (partial)
+             |
+             v
+            END
+             ^
+             |___ feedback → decision_match
     """
-    graph: StateGraph[AgentState, Any, AgentState, AgentState] = StateGraph(AgentState)
+    graph = StateGraph(AgentState)
 
     graph.add_node("data_track", data_track_node)
     graph.add_node("business_track", business_track_node)
@@ -44,9 +60,13 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
     graph.add_node("execution", execution_node)
     graph.add_node("report_gen", report_gen_node)
 
+    # Parallel fan-out from START to both tracks
     graph.add_edge(START, "data_track")
-    graph.add_edge("data_track", "business_track")
+    graph.add_edge(START, "business_track")
+    # Fan-in: both tracks converge at decision_match
+    graph.add_edge("data_track", "decision_match")
     graph.add_edge("business_track", "decision_match")
+
     graph.add_edge("decision_match", "execution")
     graph.add_conditional_edges(
         "execution",

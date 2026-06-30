@@ -21,9 +21,7 @@ def _extract_code_block(text: str) -> str:
     return text.strip()
 
 
-def _build_code_gen_prompt(
-    execution_plan: str, file_path: str, output_dir: str
-) -> str:
+def _build_code_gen_prompt(execution_plan: str, file_path: str, output_dir: str) -> str:
     return f"""You are a senior data engineer. Write a COMPLETE, runnable Python script
 that executes the analysis plan below.
 
@@ -128,19 +126,18 @@ Output the FIXED complete Python script (with ```python fence).
 """
 
 
-def execution_node(state: AgentState) -> AgentState:
+def execution_node(state: AgentState) -> dict[str, object]:
     """Stage 3 — Execution: generate analysis code, run in sandbox, ReAct retry on error.
 
-    Reads: state["execution_plan"], state["file_path"], state["execution_result"]
-    Writes: state["execution_result"], state["error"]
+    Reads: state.execution_plan, state.file_path, state.execution_result
+    Writes: state.execution_result, state.error
     """
-    execution_plan = state.get("execution_plan")
-    file_path = state["file_path"]
+    execution_plan = state.execution_plan
+    file_path = state.file_path
 
     if not execution_plan:
         logger.error("Execution: execution_plan is missing from state")
         return {
-            **state,
             "error": "Execution: execution_plan not available (Decision Match may have failed)",
             "execution_result": {
                 "retry_count": 3,  # Prevent infinite retry — this is a permanent error
@@ -148,12 +145,12 @@ def execution_node(state: AgentState) -> AgentState:
             },
         }
 
-    exec_result = state.get("execution_result", {})
+    exec_result = state.execution_result or {}
     retry_count = exec_result.get("retry_count", 0)
     attempts: list[dict[str, str]] = exec_result.get("attempts", [])
 
     # Reuse output dir across retries
-    output_dir = exec_result.get("output_dir", tempfile.mkdtemp(prefix="datainsight_"))
+    output_dir = exec_result.get("output_dir") or tempfile.mkdtemp(prefix="datainsight_")
 
     # Choose prompt: fresh generation vs ReAct fix
     if retry_count > 0 and attempts:
@@ -171,11 +168,10 @@ def execution_node(state: AgentState) -> AgentState:
         llm = get_llm(temperature=0)
         response = llm.invoke(prompt)
         raw = response.content if hasattr(response, "content") else str(response)
-        code = raw if isinstance(raw, str) else str(raw)
+        code = str(raw) if not isinstance(raw, str) else raw
     except Exception as e:
         logger.error("Execution: LLM call failed: %s", e)
         return {
-            **state,
             "error": f"Execution LLM error: {e}",
             "execution_result": {
                 "retry_count": retry_count + 1,
@@ -201,13 +197,11 @@ def execution_node(state: AgentState) -> AgentState:
             parsed = json.loads(result.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError):
             error_msg = (
-                f"Script exited 0 but produced invalid JSON. "
-                f"stdout preview: {result.stdout[:300]}"
+                f"Script exited 0 but produced invalid JSON. stdout preview: {result.stdout[:300]}"
             )
             logger.error("Execution: %s", error_msg)
             attempts.append({"code": code, "error": error_msg})
             return {
-                **state,
                 "error": error_msg,
                 "execution_result": {
                     "retry_count": retry_count + 1,
@@ -217,8 +211,7 @@ def execution_node(state: AgentState) -> AgentState:
             }
 
         logger.info("Execution: SUCCESS (attempt %d)", retry_count + 1)
-        new_state = {
-            **state,
+        return {
             "execution_result": {
                 "retry_count": retry_count,
                 "attempts": attempts,
@@ -227,10 +220,8 @@ def execution_node(state: AgentState) -> AgentState:
                 "stdout": result.stdout,
                 "parsed_output": parsed,
             },
+            "error": None,
         }
-        # Clear error from prior failed attempts on success
-        new_state.pop("error", None)
-        return new_state  # type: ignore[return-value]
 
     # Sandbox failure — build error for ReAct
     error_msg = (
@@ -245,7 +236,6 @@ def execution_node(state: AgentState) -> AgentState:
     attempts.append({"code": code, "error": error_msg})
 
     return {
-        **state,
         "error": f"Execution error (attempt {retry_count + 1}/3): {error_msg[:500]}",
         "execution_result": {
             "retry_count": retry_count + 1,

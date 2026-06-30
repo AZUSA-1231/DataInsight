@@ -70,6 +70,51 @@ def sample_execution_result() -> dict:
 
 
 @pytest.fixture
+def sample_data_profile() -> object:
+    """A minimal DataProfile for decision_match and report_gen tests."""
+    from src.agent.state import ColumnProfile, DataProfile
+
+    return DataProfile(
+        file_path="/tmp/test.csv",
+        shape=(100, 5),
+        columns=[
+            ColumnProfile(
+                name="sales",
+                dtype="float64",
+                null_count=0,
+                null_pct=0.0,
+                unique_count=50,
+                unique_pct=50.0,
+            ),
+            ColumnProfile(
+                name="region",
+                dtype="object",
+                null_count=2,
+                null_pct=2.0,
+                unique_count=4,
+                unique_pct=4.0,
+            ),
+            ColumnProfile(
+                name="date",
+                dtype="object",
+                null_count=0,
+                null_pct=0.0,
+                unique_count=100,
+                unique_pct=100.0,
+            ),
+        ],
+        statistics={
+            "sales": {"mean": 500.0, "std": 150.0, "min": 100.0, "max": 900.0},
+            "region": {"count": 98, "unique": 4, "top": "East", "freq": 30},
+        },
+        head_sample=[
+            {"sales": 500.0, "region": "East", "date": "2024-01-15"},
+            {"sales": 300.0, "region": "West", "date": "2024-01-16"},
+        ],
+    )
+
+
+@pytest.fixture
 def temp_output_dir() -> str:
     """Create a temporary directory for chart output in execution tests."""
     import tempfile

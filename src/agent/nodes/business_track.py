@@ -56,25 +56,24 @@ Abstract data requirements (do NOT reference specific columns):
 """
 
 
-def business_track_node(state: AgentState) -> AgentState:
+def business_track_node(state: AgentState) -> dict[str, object]:
     """Stage 1 (parallel) — Business Track: derive ideal metrics from user's business question.
 
-    Reads: state["user_requirement"]
-    Writes: state["business_plan"]
+    Reads: state.user_requirement
+    Writes: state.business_plan
     """
-    user_requirement = state["user_requirement"]
-    logger.info("Business Track: analyzing requirement (%d chars)", len(user_requirement))
+    logger.info("Business Track: analyzing requirement (%d chars)", len(state.user_requirement))
 
-    prompt = _build_business_prompt(user_requirement)
+    prompt = _build_business_prompt(state.user_requirement)
 
     try:
         llm = get_llm(temperature=0)
         response = llm.invoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
-        content = content if isinstance(content, str) else str(content)
+        content = str(content) if not isinstance(content, str) else content
     except Exception as e:
         logger.error("Business Track: LLM call failed: %s", e)
-        return {**state, "error": f"Business Track LLM error: {e}"}
+        return {"error": f"Business Track LLM error: {e}"}
 
     logger.info("Business Track: plan generated (%d chars)", len(content))
-    return {**state, "business_plan": content}
+    return {"business_plan": content}

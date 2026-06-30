@@ -94,9 +94,12 @@ def run(file_path: str) -> None:
 
     # First 5 rows as list of records
     head_rows = df.head(5).to_dict(orient="records")
-    head_rows_safe = [
-        {str(k): _safe_serialize(v) for k, v in row.items()} for row in head_rows
-    ]
+    head_rows_safe = [{str(k): _safe_serialize(v) for k, v in row.items()} for row in head_rows]
+
+    path = Path(file_path)
+    encoding: str | None = None
+    if path.suffix.lower() == ".csv":
+        encoding = _detect_encoding(file_path)
 
     result = {
         "file_path": file_path,
@@ -104,6 +107,7 @@ def run(file_path: str) -> None:
         "columns": columns,
         "statistics": stats,
         "head": head_rows_safe,
+        "encoding": encoding,
     }
 
     data = json.dumps(result, ensure_ascii=False, indent=2, default=str)

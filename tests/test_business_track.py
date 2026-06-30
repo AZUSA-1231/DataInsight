@@ -39,10 +39,10 @@ def test_business_track_node_success(set_llm_env: None) -> None:
     mock_response.content = "## 业务分析蓝图\n\nTest business plan."
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Analyze Q2 revenue by product line",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze Q2 revenue by product line",
+    )
 
     with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
         new_state = business_track_node(state)
@@ -62,18 +62,16 @@ def test_business_track_node_preserves_state(set_llm_env: None) -> None:
     mock_response.content = "Business plan content."
     mock_llm.invoke.return_value = mock_response
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Why did retention drop?",
-        "data_report": "Existing audit report",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Why did retention drop?",
+        cleaning_insights="Existing cleaning insights",
+    )
 
     with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
         new_state = business_track_node(state)
 
-    assert new_state["file_path"] == state["file_path"]
-    assert new_state["user_requirement"] == state["user_requirement"]
-    assert new_state["data_report"] == state["data_report"]
+    assert new_state["business_plan"] == "Business plan content."
 
 
 @pytest.mark.unit
@@ -83,10 +81,10 @@ def test_business_track_node_llm_error(set_llm_env: None) -> None:
     mock_llm = MagicMock()
     mock_llm.invoke.side_effect = RuntimeError("API timeout")
 
-    state: AgentState = {
-        "file_path": "/tmp/test.csv",
-        "user_requirement": "Anything",
-    }
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Anything",
+    )
 
     with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
         new_state = business_track_node(state)
