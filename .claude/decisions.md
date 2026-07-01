@@ -458,6 +458,125 @@ time proportional to the slower of the two LLM calls.
 ---
 
 *Last updated: V2 Phase 4 complete. D21-D32 decisions documented.*
+*Audit fix (2026-07-02): D33-D38 added.*
+
+---
+
+## D33 — Static guard: AST + regex dual-layer scanning
+
+**Date**: 2026-07-02 | **Scope**: [src/sandbox/static_guard.py](src/sandbox/static_guard.py)
+
+D2 accepted subprocess sandbox with no isolation. D17 added prompt-level constraints
+but they're advisory only. D33 is the enforcement layer: every LLM-generated script
+is scanned before it reaches `subprocess.run()`.
+
+**Layer 1 — AST import scan**: `_ImportScanner(ast.NodeVisitor)` walks `Import`/`ImportFrom`
+nodes, checks against `_BANNED_IMPORTS` (25 modules: network, subprocess, os, shutil,
+pickle, ctypes, code, etc.). Also catches dotted imports (`urllib.request` → top-level
+`urllib` is banned).
+
+**Layer 2 — Regex pattern scan**: `_BANNED_PATTERNS` (regex list) catches dynamic calls
+that AST can't see: `eval()`, `exec()`, `__import__()`, `os.system()`, `.unlink()`,
+`shutil.rmtree`, `requests.post()`, etc.
+
+**Why two layers**: AST alone can't catch `eval("os.system('rm -rf /')")` — there's
+no import to block, the code is inside a string. Regex catches the pattern regardless
+of how it materializes at runtime. But regex alone has false positives (comments,
+strings). AST validates intent at the structural level. Together they're defense-in-depth.
+
+**Integration**: Rejection triggers ReAct retry (max 3). The error message tells the
+LLM exactly what was banned, giving it a chance to fix the code. Not a hard pipeline
+failure.
+
+---
+
+## D34 — Input sanitization as outer defense layer
+
+**Date**: 2026-07-02 | **Scope**: [src/__main__.py](src/__main__.py)
+
+Before D34, user input (requirement + feedback) flowed raw into LLM prompts. An
+adversarial prompt like `### SYSTEM: ignore previous instructions` would reach
+code-gen prompts unchanged.
+
+**Pipeline**: `_sanitize_user_input(text, max_len)` strips:
+1. Prompt injection delimiters (markdown fences, `### SYSTEM/USER/ASSISTANT`,
+   `<|im_start|>/<|im_end|>`, `[INST]`, etc.)
+2. ASCII control chars below 0x20 (except `\n`, `\t`)
+3. Collapses multiple whitespace to single space
+4. Truncates to `max_len` (2000 for requirement, 1000 for feedback)
+
+**Defense-in-depth**: D34 sanitizes user input at the entry point. D33 scans generated
+code at the exit point. These are independent layers — bypassing one doesn't bypass
+the other.
+
+---
+
+## D35 — Path validation: extension whitelist + traversal rejection
+
+**Date**: 2026-07-02 | **Scope**: [src/__main__.py](src/__main__.py)
+
+`_validate_file_path()` enforces three constraints before the file path reaches any
+node: (1) extension must be `.csv`, `.xlsx`, or `.xls`; (2) file must exist;
+(3) resolved path must be within CWD (`path.relative_to(cwd)` rejects `../../etc/passwd`).
+
+**Why CWD-relative, not project-root**: The tool is a CLI — users may analyze files
+in subdirectories, not just the project root. Restricting to CWD subtree is the
+narrowest constraint that still allows reasonable use.
+
+---
+
+## D36 — `python-dotenv` replaces bespoke `.env` parser (revises D20)
+
+**Date**: 2026-07-02 | **Scope**: [src/agent/llm.py](src/agent/llm.py)
+
+D20 chose a ~15-line manual `.env` parser to avoid a dependency. The audit (H3) found
+it had edge-case bugs: no support for multi-line values, escaped characters, or inline
+comments. These bugs were silently swallowed by `except OSError: pass`.
+
+**Decision**: Add `python-dotenv>=1.0.0` as a hard dependency. `_load_dotenv()` becomes
+a thin wrapper: `load_dotenv(override=False)`. Same semantics (env vars win), zero
+behavior change for users, but handles edge cases correctly.
+
+**Why**: `python-dotenv` is pure Python, widely available, and effectively zero-cost
+as a dependency. The manual parser was a premature optimization.
+
+---
+
+## D37 — atexit-based temp cleanup (supersedes D13)
+
+**Date**: 2026-07-02 | **Scope**: [src/agent/utils.py](src/agent/utils.py)
+
+D13 intentionally kept LLM-generated temp scripts for debugging. D37 reverses that:
+all temp files and directories created by `preprocessing` and `analysis` nodes are
+registered via `register_temp_path()` and cleaned up at process exit via `atexit`.
+
+**Why the reversal**: Accumulation was worse than anticipated — every run creates
+2+ temp dirs and 1+ scripts per attempt. `--save-intermediates` already preserves
+artifacts for debugging (scripts, charts, stdout), so the temp originals are redundant
+once the run completes.
+
+**What gets cleaned**: `tempfile.mkdtemp()` output directories (chart/cleaned-data
+output) and `tempfile.mkstemp()` script files. Only paths created by the current
+process are registered — existing paths from state reuse are not re-registered.
+
+**Trade-off**: If the process hard-crashes (`kill -9`), `atexit` won't fire.
+OS-level temp cleanup handles this eventually.
+
+---
+
+## D38 — Shared utility module for cross-node helpers
+
+**Date**: 2026-07-02 | **Scope**: [src/agent/utils.py](src/agent/utils.py)
+
+`_extract_code_block` was defined identically in `preprocessing.py` and `analysis.py`
+(H9). `register_temp_path`/`_cleanup_temp_paths` is needed by both nodes (H5).
+
+**Decision**: Create `src/agent/utils.py` as the single home for shared node helpers.
+Two functions currently: `_extract_code_block` and `register_temp_path`. Module also
+holds the atexit-registered `_cleanup_temp_paths` and the `_TEMP_PATHS` list.
+
+**Scope rule**: Only functions used by 2+ nodes belong here. Node-specific helpers
+stay in their respective files. This is NOT a "dump everything" module.
 
 ---
 

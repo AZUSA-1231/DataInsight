@@ -44,7 +44,7 @@ def sample_xlsx_path() -> str:
     os.unlink(path)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def set_llm_env() -> None:
     """Set minimal env vars so LLM factory doesn't error (real key not needed for mock tests)."""
     os.environ["DATAINSIGHT_LLM_MODEL"] = "gpt-4o"

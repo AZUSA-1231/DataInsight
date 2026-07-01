@@ -212,7 +212,7 @@ def decision_match_node(state: AgentState) -> dict[str, object]:
         content = str(content) if not isinstance(content, str) else content
     except Exception as e:
         logger.error("Decision Match: LLM call failed: %s", e)
-        return {"error": f"Decision Match LLM error: {e}"}
+        return {"error": f"Decision Match LLM error: {e}", "feedback": None}
 
     json_text = _extract_json(content)
 

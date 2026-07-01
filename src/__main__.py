@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,55 @@ from src.agent.graph import build_graph
 from src.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
+
+_REQUIREMENT_MAX_LENGTH = 2000
+_FEEDBACK_MAX_LENGTH = 1000
+_ALLOWED_EXTENSIONS: set[str] = {".csv", ".xlsx", ".xls"}
+
+# Prompt injection delimiters — stripped from user input
+_INJECTION_DELIMITERS = re.compile(
+    r"```|"
+    r"---|===|"
+    r"### SYSTEM|### USER|### ASSISTANT|"
+    r"<\|im_start\|>|<\|im_end\|>|"
+    r"<\|system\|>|<\|user\|>|<\|assistant\|>|"
+    r"\[INST\]|\[/INST\]|"
+    r"<<SYS>>|<</SYS>>",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_user_input(text: str, max_len: int) -> str:
+    """Strip prompt injection delimiters, control characters, truncate."""
+    text = _INJECTION_DELIMITERS.sub(" ", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        text = text[:max_len]
+    return text
+
+
+def _validate_file_path(file_path: str) -> Path:
+    """Resolve, validate extension, and reject path traversal."""
+    path = Path(file_path).resolve()
+    ext = path.suffix.lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        print(
+            f"[ERROR] Unsupported file type: {ext}. "
+            f"Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not path.exists():
+        print(f"[ERROR] File not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    cwd = Path.cwd().resolve()
+    try:
+        path.relative_to(cwd)
+    except ValueError:
+        print(f"[ERROR] File must be within current working directory: {cwd}", file=sys.stderr)
+        sys.exit(1)
+    return path
 
 
 def _check_prerequisites(args: argparse.Namespace) -> None:
@@ -57,9 +107,7 @@ def _check_prerequisites(args: argparse.Namespace) -> None:
         print("  Config    : .env file")
     print()
 
-    if not Path(args.file_path).exists():
-        print(f"[ERROR] File not found: {args.file_path}", file=sys.stderr)
-        sys.exit(1)
+    _validate_file_path(args.file_path)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -244,7 +292,7 @@ def main() -> None:
 
     state = AgentState(
         file_path=args.file_path,
-        user_requirement=args.requirement,
+        user_requirement=_sanitize_user_input(args.requirement, _REQUIREMENT_MAX_LENGTH),
     )
 
     print(f"\nDataInsight analyzing: {args.file_path}")
@@ -288,7 +336,8 @@ def main() -> None:
             break
 
         print("Revising analysis based on feedback...\n")
-        state = state.model_copy(update={"feedback": feedback})
+        sanitized = _sanitize_user_input(feedback, _FEEDBACK_MAX_LENGTH)
+        state = state.model_copy(update={"feedback": sanitized})
 
         try:
             state = _run_graph(state, graph)

@@ -7,7 +7,6 @@ import pytest
 from src.agent.nodes.preprocessing import (
     _build_clean_code_prompt,
     _build_clean_react_fix_prompt,
-    _extract_code_block,
     _serialize_preprocessing_steps,
     preprocessing_node,
 )
@@ -26,24 +25,6 @@ def test_serialize_preprocessing_steps(make_execution_plan: object) -> None:
 @pytest.mark.unit
 def test_serialize_preprocessing_steps_fallback() -> None:
     assert _serialize_preprocessing_steps("not a plan") == "[]"
-
-
-@pytest.mark.unit
-def test_extract_code_block_no_fence() -> None:
-    code = "print('hello')\n"
-    assert _extract_code_block(code) == code.strip()
-
-
-@pytest.mark.unit
-def test_extract_code_block_with_fence() -> None:
-    text = "Some text\n```python\nprint('hello')\n```\nMore text"
-    assert _extract_code_block(text) == "print('hello')"
-
-
-@pytest.mark.unit
-def test_extract_code_block_no_language_tag() -> None:
-    text = "```\nprint('hello')\n```"
-    assert _extract_code_block(text) == "print('hello')"
 
 
 @pytest.mark.unit

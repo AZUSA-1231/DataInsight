@@ -208,7 +208,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
     intent_json = analysis_intent.model_dump_json(indent=2) if analysis_intent else "{}"
     alignment_notes = execution_plan.alignment_notes if execution_plan else "无"
 
-    has_results = bool(analysis_result.get("parsed_output") and not error)
+    has_results = "parsed_output" in analysis_result and not error
 
     if has_results:
         logger.info("Report Gen: assembling full report")

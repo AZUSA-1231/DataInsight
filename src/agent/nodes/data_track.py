@@ -105,10 +105,17 @@ def data_track_node(state: AgentState) -> dict[str, object]:
     )
 
     prompt = _build_cleaning_insights_prompt(data_profile)
-    llm = get_llm(temperature=0)
-    response = llm.invoke(prompt)
-    content = response.content if hasattr(response, "content") else str(response)
-    cleaning_insights = str(content) if not isinstance(content, str) else content
+    try:
+        llm = get_llm(temperature=0)
+        response = llm.invoke(prompt)
+        content = response.content if hasattr(response, "content") else str(response)
+        cleaning_insights = str(content) if not isinstance(content, str) else content
+    except Exception as e:
+        logger.error("Data Track: LLM call failed: %s", e)
+        return {
+            "error": f"Data Track LLM error: {e}",
+            "data_profile": data_profile,
+        }
 
     logger.info("Data Track: cleaning insights generated (%d chars)", len(cleaning_insights))
     return {"data_profile": data_profile, "cleaning_insights": cleaning_insights}

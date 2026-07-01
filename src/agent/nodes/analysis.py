@@ -3,22 +3,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import tempfile
 
 from src.agent.llm import get_llm
 from src.agent.state import AgentState, ExecutionPlan
+from src.agent.utils import _extract_code_block, register_temp_path
 from src.sandbox.executor import SandboxResult, run_script
+from src.sandbox.static_guard import check_static
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_code_block(text: str) -> str:
-    """Extract Python code from a markdown code fence if present."""
-    match = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
 
 
 def _serialize_analysis_steps(execution_plan: object) -> str:
@@ -178,6 +171,8 @@ def analysis_node(state: AgentState) -> dict[str, object]:
     attempts: list[dict[str, str]] = an_result.get("attempts", [])
 
     output_dir = an_result.get("output_dir") or tempfile.mkdtemp(prefix="datainsight_analysis_")
+    if "output_dir" not in an_result:
+        register_temp_path(output_dir)
 
     if retry_count > 0 and attempts:
         last = attempts[-1]
@@ -207,7 +202,21 @@ def analysis_node(state: AgentState) -> dict[str, object]:
 
     code = _extract_code_block(code)
 
+    safe, reason = check_static(code)
+    if not safe:
+        logger.error("Analysis: static guard rejected code: %s", reason)
+        attempts.append({"code": code, "error": reason})
+        return {
+            "error": f"Analysis: unsafe code rejected — {reason}",
+            "analysis_result": {
+                "retry_count": retry_count + 1,
+                "attempts": attempts,
+                "output_dir": output_dir,
+            },
+        }
+
     fd, script_path = tempfile.mkstemp(suffix=".py", prefix="datainsight_analysis_")
+    register_temp_path(script_path)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(code)
     logger.info("Analysis: script written to %s (%d bytes)", script_path, len(code))
