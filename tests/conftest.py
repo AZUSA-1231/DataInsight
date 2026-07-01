@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -169,6 +171,63 @@ def sample_execution_plan() -> object:
         ],
         alignment_notes="基于当前数据，本报告能够部分回答用户问题。",
     )
+
+
+@pytest.fixture
+def make_execution_plan() -> Callable[..., object]:
+    """Factory fixture for ExecutionPlan with sensible defaults.
+
+    Uses ``is not None`` checks so callers can pass empty lists (``[]``)
+    to signal "no steps" without them being overridden by defaults.
+    """
+
+    from src.agent.state import ExecutionPlan
+
+    def _make(**overrides: Any) -> ExecutionPlan:
+        defaults: dict[str, Any] = {
+            "feasibility_map": [
+                {
+                    "intent_dimension": "region",
+                    "matched_columns": ["region"],
+                    "feasibility": "可直接实现",
+                    "confidence": "High",
+                    "reasoning": "Direct column match",
+                }
+            ],
+            "model_selections": [
+                {
+                    "analysis_step": "Trend analysis",
+                    "method": "pandas.DataFrame.corr",
+                    "reasoning": "Continuous target with categorical dimension",
+                    "feasibility": "可直接实现",
+                }
+            ],
+            "preprocessing_steps": [
+                {
+                    "step": 1,
+                    "action": "drop_null_rows",
+                    "target_columns": ["region"],
+                    "urgency": "高优先",
+                    "reason": "2% nulls in region column",
+                }
+            ],
+            "analysis_steps": [
+                {
+                    "step": 1,
+                    "action": "compute_correlation",
+                    "target_columns": ["sales", "region"],
+                    "method": "pandas.DataFrame.corr",
+                    "expected_output": "correlation matrix",
+                }
+            ],
+            "alignment_notes": "基于当前数据，本报告能够部分回答用户问题。",
+        }
+        for k, v in overrides.items():
+            if v is not None:
+                defaults[k] = v
+        return ExecutionPlan(**defaults)
+
+    return _make
 
 
 @pytest.fixture

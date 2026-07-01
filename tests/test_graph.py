@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import json
 from unittest.mock import MagicMock, patch
 
@@ -24,84 +23,6 @@ _INTENT_JSON = json.dumps(
     }
 )
 
-_EXECUTION_PLAN_JSON = json.dumps(
-    {
-        "feasibility_map": [
-            {
-                "intent_dimension": "time period",
-                "matched_columns": ["date"],
-                "feasibility": "可直接实现",
-                "confidence": "High",
-                "reasoning": "Direct match",
-            }
-        ],
-        "model_selections": [
-            {
-                "analysis_step": "Trend analysis",
-                "method": "pandas.DataFrame.corr",
-                "reasoning": "Simple correlation for trend",
-                "feasibility": "可直接实现",
-            }
-        ],
-        "preprocessing_steps": [],
-        "analysis_steps": [
-            {
-                "step": 1,
-                "action": "compute_correlation",
-                "target_columns": ["sales"],
-                "method": "pandas.DataFrame.corr",
-                "expected_output": "correlation matrix",
-            }
-        ],
-        "alignment_notes": "数据与业务对齐备忘：基于当前数据可部分回答用户问题。",
-    },
-    ensure_ascii=False,
-)
-
-_REVISED_PLAN_JSON = json.dumps(
-    {
-        "feasibility_map": [
-            {
-                "intent_dimension": "monthly",
-                "matched_columns": ["date"],
-                "feasibility": "可直接实现",
-                "confidence": "High",
-                "reasoning": "Monthly grouping per feedback",
-            }
-        ],
-        "model_selections": [
-            {
-                "analysis_step": "Monthly trend",
-                "method": "pandas.DataFrame.resample",
-                "reasoning": "Monthly resample as requested",
-                "feasibility": "可直接实现",
-            }
-        ],
-        "preprocessing_steps": [],
-        "analysis_steps": [],
-        "alignment_notes": "修订版：基于用户反馈改用月度分组。",
-    },
-    ensure_ascii=False,
-)
-
-
-def _make_plan() -> ExecutionPlan:
-    return ExecutionPlan(
-        feasibility_map=[
-            {
-                "intent_dimension": "time period",
-                "matched_columns": ["date"],
-                "feasibility": "可直接实现",
-                "confidence": "High",
-                "reasoning": "Direct match",
-            }
-        ],
-        model_selections=[],
-        preprocessing_steps=[],
-        analysis_steps=[],
-        alignment_notes="Test plan.",
-    )
-
 
 @pytest.mark.unit
 def test_graph_compiles() -> None:
@@ -123,7 +44,9 @@ def test_graph_node_names() -> None:
 
 
 @pytest.mark.integration
-def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -> None:
+def test_graph_data_track_integration(
+    sample_csv_path: str, set_llm_env: None, make_execution_plan: object
+) -> None:
     """Invoke the graph with parallel data_track + business_track and mocked downstream nodes."""
     _ = set_llm_env
 
@@ -134,13 +57,18 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
     mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
-    mock_dm.invoke.return_value = MagicMock(content=_EXECUTION_PLAN_JSON)
+    mock_dm.invoke.return_value = MagicMock(
+        content=make_execution_plan(preprocessing_steps=[]).model_dump_json()
+    )
 
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
 
     mock_an = MagicMock()
     mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
+
+    mock_rg = MagicMock()
+    mock_rg.invoke.return_value = MagicMock(content="# DataInsight Report\n\nMocked.")
 
     from src.sandbox.executor import SandboxResult
 
@@ -176,7 +104,7 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
         patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
-        contextlib.suppress(NotImplementedError),
+        patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         graph.invoke(state)
 
@@ -188,7 +116,9 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
 
 
 @pytest.mark.integration
-def test_graph_m2_full_pipeline(sample_csv_path: str, set_llm_env: None) -> None:
+def test_graph_m2_full_pipeline(
+    sample_csv_path: str, set_llm_env: None, make_execution_plan: object
+) -> None:
     """Full M1+M2 pipeline: data_track → business_track → decision_match."""
     _ = set_llm_env
 
@@ -208,7 +138,7 @@ def test_graph_m2_full_pipeline(sample_csv_path: str, set_llm_env: None) -> None
 
     mock_dm = MagicMock()
     mock_dm_response = MagicMock()
-    mock_dm_response.content = _EXECUTION_PLAN_JSON
+    mock_dm_response.content = make_execution_plan(preprocessing_steps=[]).model_dump_json()
     mock_dm.invoke.return_value = mock_dm_response
 
     state = AgentState(
@@ -241,13 +171,13 @@ def test_graph_m2_full_pipeline(sample_csv_path: str, set_llm_env: None) -> None
     assert state.analysis_intent.analysis_type == "diagnostic"
     assert isinstance(state.execution_plan, ExecutionPlan)
     assert len(state.execution_plan.feasibility_map) == 1
-    assert "数据与业务对齐备忘" in state.execution_plan.alignment_notes
+    assert "部分回答用户问题" in state.execution_plan.alignment_notes
     assert state.error is None
 
 
 @pytest.mark.integration
 def test_graph_m3_execution_integration(
-    sample_csv_path: str, set_llm_env: None, temp_output_dir: str
+    sample_csv_path: str, set_llm_env: None, temp_output_dir: str, make_execution_plan: object
 ) -> None:
     """Full M1+M2+M3a+M3b pipeline: data_track, business_track, decision_match,
     preprocessing, analysis with mocked LLMs and sandbox."""
@@ -267,7 +197,9 @@ def test_graph_m3_execution_integration(
     mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
-    mock_dm.invoke.return_value = MagicMock(content=_EXECUTION_PLAN_JSON)
+    mock_dm.invoke.return_value = MagicMock(
+        content=make_execution_plan(preprocessing_steps=[]).model_dump_json()
+    )
 
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
@@ -400,6 +332,7 @@ def test_graph_m4_full_pipeline(
     sample_csv_path: str,
     set_llm_env: None,
     sample_analysis_result: dict,
+    make_execution_plan: object,
 ) -> None:
     """Full 6-node pipeline: data_track → business_track → decision_match →
     preprocessing → analysis → report_gen."""
@@ -420,7 +353,9 @@ def test_graph_m4_full_pipeline(
     mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
-    mock_dm.invoke.return_value = MagicMock(content=_EXECUTION_PLAN_JSON)
+    mock_dm.invoke.return_value = MagicMock(
+        content=make_execution_plan(preprocessing_steps=[]).model_dump_json()
+    )
 
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
@@ -492,6 +427,7 @@ def test_graph_feedback_iteration(
     sample_analysis_result: dict,
     sample_data_profile: object,
     sample_analysis_intent: object,
+    make_execution_plan: object,
 ) -> None:
     """Feedback loop: user feedback → decision_match revises → preprocessing →
     analysis → report_gen regenerates."""
@@ -509,12 +445,37 @@ def test_graph_feedback_iteration(
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\nClean.",
         analysis_intent=sample_analysis_intent,
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(
+            preprocessing_steps=[], analysis_steps=[], model_selections=[]
+        ),
         feedback="The chart on regional sales is wrong, use monthly data instead.",
     )
 
     mock_dm = MagicMock()
-    mock_dm.invoke.return_value = MagicMock(content=_REVISED_PLAN_JSON)
+    mock_dm.invoke.return_value = MagicMock(
+        content=make_execution_plan(
+            feasibility_map=[
+                {
+                    "intent_dimension": "monthly",
+                    "matched_columns": ["date"],
+                    "feasibility": "可直接实现",
+                    "confidence": "High",
+                    "reasoning": "Monthly grouping per feedback",
+                }
+            ],
+            model_selections=[
+                {
+                    "analysis_step": "Monthly trend",
+                    "method": "pandas.DataFrame.resample",
+                    "reasoning": "Monthly resample as requested",
+                    "feasibility": "可直接实现",
+                }
+            ],
+            preprocessing_steps=[],
+            analysis_steps=[],
+            alignment_notes="修订版：基于用户反馈改用月度分组。",
+        ).model_dump_json()
+    )
 
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")

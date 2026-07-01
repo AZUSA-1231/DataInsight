@@ -1,14 +1,14 @@
-# Plan: DataInsight V2.1 — Test Hardening & Debt Repayment
+# Plan: DataInsight V2.1 — Post-V2 Test Hardening
 
-**Depends on**: [data-insight-agent-v2.plan.md](data-insight-agent-v2.plan.md) (Phase 0-6)
-**Status**: Pre-Phase-5 — pay down testing debt before Analysis node development
+**Depends on**: [data-insight-agent-v2.plan.md](data-insight-agent-v2.plan.md) Phase 6 全部完成
+**Status**: 已完成 (2026-07-01)
 **Complexity**: Medium
 
 ## Motivation
 
-Phase 3-4 实施过程中暴露了 3 类可重现的测试脆弱性问题，其中 L1 和 L3 会在
-Phase 5（Analysis 节点）完全重现（`analysis_steps=[]` → skip 路径，
-mock 断言再次不匹配）。本 Plan 在继续 Phase 5 之前系统性清偿这些债务。
+Phase 3-4 实施过程中暴露了 4 类可重现的测试脆弱性问题。这些问题对 Phase 5-6 的
+src 开发**不构成破坏性影响**（新文件不依赖已有脆弱 helper），但会持续增加后续维护
+摩擦。本 Plan 在 V2 全阶段开发完成后，集中清偿这些测试债务。
 
 ## Lessons Learned (Phase 3-4)
 
@@ -26,10 +26,8 @@ preprocessing_steps=preprocessing_steps or [default]
 preprocessing_steps=preprocessing_steps if preprocessing_steps is not None else [default]
 ```
 
-**影响范围**：三个测试文件各自有独立的 `_make_plan()` helper，行为不一致
-（`or` fallback vs 硬编码 `[]`），缺乏共享工厂。
-
-**重现风险**：Phase 5 `analysis_steps` 有相同语义——空列表表示"无分析步骤"。
+**影响范围**：三个测试文件各自有独立的 `_make_plan()` helper（`test_execution.py`、
+`test_preprocessing.py`、`test_graph.py`），行为不一致，缺乏共享工厂。
 
 ### L2: `set_llm_env` fixture 缺失 → 真实 API 调用
 
@@ -47,9 +45,6 @@ L1 导致 LLM 被意外触发，OpenAI SDK 直接报 401。双重叠加使排查
 
 **根因**：集成测试 mock 期望是"硬编码"的——假定每个节点都会调 LLM。
 当节点内部有 skip 分支时假设破裂。
-
-**重现风险**：Phase 5 的 `analysis_steps` 空 → analysis 节点 skip → 同样的
-`mock_analysis.invoke` 不会被调用 → 断言失败。
 
 ### L4: `contextlib.suppress(NotImplementedError)` 掩盖下游失败
 
@@ -72,9 +67,11 @@ graph.invoke 中未 mock 节点的错误。如果新插入节点未 mock，测�
 
 ## Implementation
 
-### Phase 5a: Testing Debt Repayment
+### V2.1 — Testing Debt Repayment (单一 Phase)
 
-**5a.1 — 统一 `make_execution_plan` 工厂** (T1)
+V2 Phase 5-6 完成后执行，不改动 `src/` 任何逻辑，纯测试重构。
+
+#### T1 — 统一 `make_execution_plan` 工厂
 
 在 `tests/conftest.py` 中新增 `make_execution_plan` fixture，使用 `is not None`
 模式处理所有 Optional 集合字段：
@@ -84,21 +81,10 @@ graph.invoke 中未 mock 节点的错误。如果新插入节点未 mock，测�
 def make_execution_plan() -> Callable[..., ExecutionPlan]:
     def _make(**overrides: Any) -> ExecutionPlan:
         defaults: dict[str, Any] = {
-            "feasibility_map": [
-                {"intent_dimension": "region", "matched_columns": ["region"],
-                 "feasibility": "可直接实现", "confidence": "High",
-                 "reasoning": "Direct match"},
-            ],
+            "feasibility_map": [...],
             "model_selections": [],
-            "preprocessing_steps": [
-                {"step": 1, "action": "drop_null_rows", "target_columns": ["region"],
-                 "urgency": "高优先", "reason": "2% nulls"},
-            ],
-            "analysis_steps": [
-                {"step": 1, "action": "compute_correlation",
-                 "target_columns": ["sales"], "method": "pandas.DataFrame.corr",
-                 "expected_output": "correlation matrix"},
-            ],
+            "preprocessing_steps": [...],
+            "analysis_steps": [...],
             "alignment_notes": "Test plan.",
         }
         merged = {k: overrides.get(k, v) for k, v in defaults.items()}
@@ -107,98 +93,57 @@ def make_execution_plan() -> Callable[..., ExecutionPlan]:
     return _make
 ```
 
-替换 `test_execution.py`、`test_preprocessing.py`、`test_graph.py` 中的独立 `_make_plan()`。
+替换所有测试文件中的独立 `_make_plan()` / `_make_execution_plan()` helper。
 
-**5a.2 — 废弃全局 `_EXECUTION_PLAN_JSON`** (T2)
+#### T2 — 废弃全局 `_EXECUTION_PLAN_JSON`
 
 删除 `tests/test_graph.py` 中的 `_EXECUTION_PLAN_JSON` 和 `_REVISED_PLAN_JSON`。
 集成测试改用 `make_execution_plan` 显式构造。
 
-**5a.3 — 全量 `set_llm_env` 审查** (T3)
+#### T3 — 全量 `set_llm_env` 审查
 
-审查所有 `*_node_*` 测试，确保每个都挂了 `set_llm_env` fixture。
-添加 pre-commit 检查规则（grep 测试签名）。
+审查所有 `*_node_*` 测试，确保每个都挂 `set_llm_env` fixture。
 
-**5a.4 — Smoke test 骨架** (T4)
+#### T4 — Smoke test 骨架
 
 新建 `tests/test_smoke.py`：
-- mock LLM 返回固定代码（dropna + describe + corr）
+- mock LLM 返回固定代码
 - 不 mock `run_script`
 - 验证 subprocess 真实执行成功，JSON 输出可解析
 
-```python
-@pytest.mark.smoke
-def test_preprocessing_real_sandbox(sample_csv_path, set_llm_env, tmp_path):
-    """Preprocessing sandbox executes real Python code (mock LLM only)."""
-    plan = ExecutionPlan(
-        feasibility_map=[], model_selections=[],
-        preprocessing_steps=[{"step": 1, "action": "drop_null_rows",
-                              "target_columns": ["age"], "urgency": "高优先",
-                              "reason": "test"}],
-        analysis_steps=[], alignment_notes="",
-    )
-    # Mock LLM returns a real cleaning script
-    # Do NOT mock run_script — this exercises the actual subprocess path
-```
+#### T5 — 移除 `contextlib.suppress`
 
-**5a.5 — 移除 `contextlib.suppress`** (T5)
-
-修改 `test_graph_data_track_integration`：mock report_gen 节点 LLM，
-移除 `contextlib.suppress(NotImplementedError)`。
-
-### Phase 5b: Analysis Node Development
-
-同 [V2 plan Phase 5](data-insight-agent-v2.plan.md)。
+修改 `test_graph_data_track_integration`：mock 完整链，移除
+`contextlib.suppress(NotImplementedError)`。
 
 ## Files to Change
 
-| File | Action | Phase |
-|------|--------|-------|
-| `tests/conftest.py` | UPDATE | 5a.1 — 新增 `make_execution_plan` fixture |
-| `tests/test_graph.py` | REFACTOR | 5a.2 — 废弃全局 JSON，使用共享 factory |
-| `tests/test_execution.py` | REFACTOR | 5a.1 — 替换 `_make_plan()` |
-| `tests/test_preprocessing.py` | REFACTOR | 5a.1 — 替换 `_make_plan()` |
-| `tests/test_report_gen.py` | REFACTOR | 5a.1 — 替换 `_make_plan()` |
-| `tests/test_smoke.py` | CREATE | 5a.4 — 真实沙箱 smoke test |
-| `tests/test_analysis.py` | CREATE | 5b — Analysis 节点测试 |
-| `src/agent/nodes/analysis.py` | CREATE | 5b — Analysis 节点 |
-| `src/agent/state.py` | UPDATE | 5b — 新增 `analysis_result` 字段 |
-| `src/agent/graph.py` | UPDATE | 5b — 插入 analysis 节点，替换 execution |
-| `src/agent/nodes/execution.py` | DELETE | 5b — 被 preprocessing + analysis 替代 |
-| `src/agent/nodes/__init__.py` | UPDATE | 5b — 导出 analysis_node |
+| File | Action | Why |
+|------|--------|-----|
+| `tests/conftest.py` | UPDATE | T1 — 新增 `make_execution_plan` fixture |
+| `tests/test_graph.py` | REFACTOR | T2, T5 — 废弃全局 JSON，移除 suppress |
+| `tests/test_execution.py` | REFACTOR | T1 — 替换独立 `_make_plan()` |
+| `tests/test_preprocessing.py` | REFACTOR | T1 — 替换独立 `_make_plan()` |
+| `tests/test_report_gen.py` | REFACTOR | T1 — 替换独立 `_make_plan()` |
+| `tests/test_analysis.py` | REFACTOR | T1 — 替换独立 `_make_plan()` （如有） |
+| `tests/test_smoke.py` | CREATE | T4 — 真实沙箱 smoke test |
 
 ## Validation
 
 ```bash
-# 5a 完成后：
 ruff check . && ruff format --check .
 mypy src/
-pytest -v  # 78 → ~82 (新增 smoke tests)
-
-# 5b 完成后：
-ruff check . && ruff format --check .
-mypy src/
-pytest -v  # ~82 → ~92 (新增 analysis tests)
-
-# 完整端到端：
-python -m src data.csv "分析问题" -s -v
+pytest -v  # 测试总数因 smoke test 增加，src/ 行为不变
 ```
 
 ## Dependencies
 
 ```
-Phase 5a (Debt Repayment) ──→ Phase 5b (Analysis Node) ──→ Phase 6 (Report Gen Refactor)
+V2 Phase 6 (Report Gen) ──→ V2.1 Test Hardening
 ```
 
-Phase 5a 必须在 5b 之前完成——否则 L1/L3 在 analysis 节点测试中完全重现。
-
-## Acceptance
-
-- [ ] Phase 5a: `make_execution_plan` 工厂统一，全局 JSON 废弃，smoke test 通过
-- [ ] Phase 5b: Analysis 节点 + ReAct，execution.py 删除
-- [ ] Phase 6: Report Gen 重构
-- [ ] 端到端测试：`python -m src data.csv "问题" -s -v`
-- [ ] ruff check + mypy src/ + pytest -v 全部绿灯
+V2.1 是纯测试重构，不改动 `src/` 逻辑。在 V2 全部功能节点就位后执行，
+收益最大（此时所有 `_make_plan` 变体都已产生，需要统一）。
 
 ---
-*Plan for DataInsight V2.1 — Test hardening derived from Phase 3-4 lessons learned.*
+*Plan for DataInsight V2.1 — Post-V2 test hardening derived from Phase 3-4 lessons learned.*

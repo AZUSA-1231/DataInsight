@@ -11,37 +11,13 @@ from src.agent.nodes.preprocessing import (
     _serialize_preprocessing_steps,
     preprocessing_node,
 )
-from src.agent.state import AgentState, ExecutionPlan
+from src.agent.state import AgentState
 from src.sandbox.executor import SandboxResult
 
 
-def _make_plan(
-    preprocessing_steps: list[dict] | None = None,
-) -> ExecutionPlan:
-    return ExecutionPlan(
-        feasibility_map=[],
-        model_selections=[],
-        preprocessing_steps=(
-            preprocessing_steps
-            if preprocessing_steps is not None
-            else [
-                {
-                    "step": 1,
-                    "action": "drop_null_rows",
-                    "target_columns": ["region"],
-                    "urgency": "高优先",
-                    "reason": "2% nulls in region column",
-                }
-            ]
-        ),
-        analysis_steps=[],
-        alignment_notes="Test plan.",
-    )
-
-
 @pytest.mark.unit
-def test_serialize_preprocessing_steps() -> None:
-    plan = _make_plan()
+def test_serialize_preprocessing_steps(make_execution_plan: object) -> None:
+    plan = make_execution_plan()
     text = _serialize_preprocessing_steps(plan)
     assert "drop_null_rows" in text
     assert "region" in text
@@ -71,8 +47,8 @@ def test_extract_code_block_no_language_tag() -> None:
 
 
 @pytest.mark.unit
-def test_build_clean_code_prompt_structure() -> None:
-    prompt = _build_clean_code_prompt(_make_plan(), "/tmp/data.csv", "/tmp/out")
+def test_build_clean_code_prompt_structure(make_execution_plan: object) -> None:
+    prompt = _build_clean_code_prompt(make_execution_plan(), "/tmp/data.csv", "/tmp/out")
 
     assert "data cleaning specialist" in prompt.lower()
     assert "drop_null_rows" in prompt
@@ -85,9 +61,9 @@ def test_build_clean_code_prompt_structure() -> None:
 
 
 @pytest.mark.unit
-def test_build_clean_react_fix_prompt_includes_error() -> None:
+def test_build_clean_react_fix_prompt_includes_error(make_execution_plan: object) -> None:
     prompt = _build_clean_react_fix_prompt(
-        _make_plan(),
+        make_execution_plan(),
         "df.dropna()\n",
         "KeyError: 'region'",
         "/tmp/data.csv",
@@ -116,9 +92,9 @@ def test_preprocessing_node_missing_execution_plan() -> None:
 
 
 @pytest.mark.unit
-def test_preprocessing_node_no_steps_skips(set_llm_env: None) -> None:
+def test_preprocessing_node_no_steps_skips(set_llm_env: None, make_execution_plan: object) -> None:
     _ = set_llm_env
-    plan = _make_plan(preprocessing_steps=[])
+    plan = make_execution_plan(preprocessing_steps=[])
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean data",
@@ -135,7 +111,9 @@ def test_preprocessing_node_no_steps_skips(set_llm_env: None) -> None:
 
 
 @pytest.mark.unit
-def test_preprocessing_node_success_first_attempt(set_llm_env: None, temp_output_dir: str) -> None:
+def test_preprocessing_node_success_first_attempt(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     valid_script = (
@@ -162,7 +140,7 @@ def test_preprocessing_node_success_first_attempt(set_llm_env: None, temp_output
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales data",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -182,7 +160,7 @@ def test_preprocessing_node_success_first_attempt(set_llm_env: None, temp_output
 
 @pytest.mark.unit
 def test_preprocessing_node_sandbox_error_triggers_retry(
-    set_llm_env: None, temp_output_dir: str
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -201,7 +179,7 @@ def test_preprocessing_node_sandbox_error_triggers_retry(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -220,7 +198,7 @@ def test_preprocessing_node_sandbox_error_triggers_retry(
 
 @pytest.mark.unit
 def test_preprocessing_node_react_retry_then_success(
-    set_llm_env: None, temp_output_dir: str
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -233,7 +211,7 @@ def test_preprocessing_node_react_retry_then_success(
     mock_response.content = "pd.to_numeric(df['col'])\n"
     mock_llm.invoke.return_value = mock_response
 
-    plan = _make_plan()
+    plan = make_execution_plan()
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales",
@@ -284,7 +262,9 @@ def test_preprocessing_node_react_retry_then_success(
 
 
 @pytest.mark.unit
-def test_preprocessing_node_timeout_handling(set_llm_env: None, temp_output_dir: str) -> None:
+def test_preprocessing_node_timeout_handling(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     timeout_result = SandboxResult(
@@ -302,7 +282,7 @@ def test_preprocessing_node_timeout_handling(set_llm_env: None, temp_output_dir:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -317,7 +297,9 @@ def test_preprocessing_node_timeout_handling(set_llm_env: None, temp_output_dir:
 
 
 @pytest.mark.unit
-def test_preprocessing_node_invalid_json_output(set_llm_env: None, temp_output_dir: str) -> None:
+def test_preprocessing_node_invalid_json_output(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     bad_result = SandboxResult(
@@ -335,7 +317,7 @@ def test_preprocessing_node_invalid_json_output(set_llm_env: None, temp_output_d
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -350,7 +332,7 @@ def test_preprocessing_node_invalid_json_output(set_llm_env: None, temp_output_d
 
 
 @pytest.mark.unit
-def test_preprocessing_node_llm_error(set_llm_env: None) -> None:
+def test_preprocessing_node_llm_error(set_llm_env: None, make_execution_plan: object) -> None:
     _ = set_llm_env
 
     mock_llm = MagicMock()
@@ -359,7 +341,7 @@ def test_preprocessing_node_llm_error(set_llm_env: None) -> None:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_llm):

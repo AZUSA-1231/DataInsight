@@ -225,10 +225,10 @@ python -m src data.csv "分析问题" -s -v
 - [x] Phase 2: Business Track 收窄为意图理解器，56/56 测试通过
 - [x] Phase 3: Decision Match → Planner（模型选型 + 完整推理链）
 - [x] Phase 4: Preprocessing 节点（含 ReAct）
-- [ ] Phase 5: Analysis 节点（含 ReAct）
-- [ ] Phase 6: Report Gen 重构
+- [x] Phase 5: Analysis 节点（含 ReAct）
+- [x] Phase 6: Report Gen 重构
 - [ ] 端到端测试：`python -m src data.csv "问题" -s -v` 产出干净报告
-- [ ] ruff check + mypy src/ + pytest -v 全部绿灯
+- [x] ruff check + mypy src/ + pytest -v 全部绿灯
 
 ---
 *Plan for DataInsight V2 — First Major Update. Phase 0 starts with Pydantic migration.*

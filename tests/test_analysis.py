@@ -11,37 +11,13 @@ from src.agent.nodes.analysis import (
     _serialize_analysis_steps,
     analysis_node,
 )
-from src.agent.state import AgentState, ExecutionPlan
+from src.agent.state import AgentState
 from src.sandbox.executor import SandboxResult
 
 
-def _make_plan(
-    analysis_steps: list[dict] | None = None,
-) -> ExecutionPlan:
-    return ExecutionPlan(
-        feasibility_map=[],
-        model_selections=[],
-        preprocessing_steps=[],
-        analysis_steps=(
-            analysis_steps
-            if analysis_steps is not None
-            else [
-                {
-                    "step": 1,
-                    "action": "compute_correlation",
-                    "target_columns": ["sales", "revenue"],
-                    "method": "pandas.DataFrame.corr",
-                    "expected_output": "correlation matrix",
-                }
-            ]
-        ),
-        alignment_notes="Test plan.",
-    )
-
-
 @pytest.mark.unit
-def test_serialize_analysis_steps() -> None:
-    plan = _make_plan()
+def test_serialize_analysis_steps(make_execution_plan: object) -> None:
+    plan = make_execution_plan()
     text = _serialize_analysis_steps(plan)
     assert "compute_correlation" in text
     assert "sales" in text
@@ -71,8 +47,8 @@ def test_extract_code_block_no_language_tag() -> None:
 
 
 @pytest.mark.unit
-def test_build_analysis_code_prompt_structure() -> None:
-    prompt = _build_analysis_code_prompt(_make_plan(), "/tmp/data.csv", "/tmp/out")
+def test_build_analysis_code_prompt_structure(make_execution_plan: object) -> None:
+    prompt = _build_analysis_code_prompt(make_execution_plan(), "/tmp/data.csv", "/tmp/out")
 
     assert "data analyst" in prompt.lower()
     assert "Agg" in prompt
@@ -89,9 +65,9 @@ def test_build_analysis_code_prompt_structure() -> None:
 
 
 @pytest.mark.unit
-def test_build_analysis_react_fix_prompt_includes_error() -> None:
+def test_build_analysis_react_fix_prompt_includes_error(make_execution_plan: object) -> None:
     prompt = _build_analysis_react_fix_prompt(
-        _make_plan(),
+        make_execution_plan(),
         "df.corr()\n",
         "KeyError: 'sales'",
         "/tmp/data.csv",
@@ -120,9 +96,11 @@ def test_analysis_node_missing_execution_plan() -> None:
 
 
 @pytest.mark.unit
-def test_analysis_node_no_analysis_steps_skips(set_llm_env: None) -> None:
+def test_analysis_node_no_analysis_steps_skips(
+    set_llm_env: None, make_execution_plan: object
+) -> None:
     _ = set_llm_env
-    plan = _make_plan(analysis_steps=[])
+    plan = make_execution_plan(analysis_steps=[])
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
@@ -140,7 +118,9 @@ def test_analysis_node_no_analysis_steps_skips(set_llm_env: None) -> None:
 
 
 @pytest.mark.unit
-def test_analysis_node_success_first_attempt(set_llm_env: None, temp_output_dir: str) -> None:
+def test_analysis_node_success_first_attempt(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     valid_script = (
@@ -167,7 +147,7 @@ def test_analysis_node_success_first_attempt(set_llm_env: None, temp_output_dir:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales data",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -188,7 +168,7 @@ def test_analysis_node_success_first_attempt(set_llm_env: None, temp_output_dir:
 
 @pytest.mark.unit
 def test_analysis_node_sandbox_error_triggers_retry(
-    set_llm_env: None, temp_output_dir: str
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -207,7 +187,7 @@ def test_analysis_node_sandbox_error_triggers_retry(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -225,7 +205,9 @@ def test_analysis_node_sandbox_error_triggers_retry(
 
 
 @pytest.mark.unit
-def test_analysis_node_react_retry_then_success(set_llm_env: None, temp_output_dir: str) -> None:
+def test_analysis_node_react_retry_then_success(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     fail_result = SandboxResult(
@@ -237,7 +219,7 @@ def test_analysis_node_react_retry_then_success(set_llm_env: None, temp_output_d
     mock_response.content = "df.corr()\n"
     mock_llm.invoke.return_value = mock_response
 
-    plan = _make_plan()
+    plan = make_execution_plan()
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
@@ -288,7 +270,9 @@ def test_analysis_node_react_retry_then_success(set_llm_env: None, temp_output_d
 
 
 @pytest.mark.unit
-def test_analysis_node_timeout_handling(set_llm_env: None, temp_output_dir: str) -> None:
+def test_analysis_node_timeout_handling(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     timeout_result = SandboxResult(
@@ -306,7 +290,7 @@ def test_analysis_node_timeout_handling(set_llm_env: None, temp_output_dir: str)
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -321,7 +305,9 @@ def test_analysis_node_timeout_handling(set_llm_env: None, temp_output_dir: str)
 
 
 @pytest.mark.unit
-def test_analysis_node_invalid_json_output(set_llm_env: None, temp_output_dir: str) -> None:
+def test_analysis_node_invalid_json_output(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     bad_result = SandboxResult(
@@ -339,7 +325,7 @@ def test_analysis_node_invalid_json_output(set_llm_env: None, temp_output_dir: s
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -355,7 +341,11 @@ def test_analysis_node_invalid_json_output(set_llm_env: None, temp_output_dir: s
 
 @pytest.mark.unit
 def test_analysis_node_preserves_state(
-    set_llm_env: None, temp_output_dir: str, sample_data_profile: None, sample_analysis_intent: None
+    set_llm_env: None,
+    temp_output_dir: str,
+    sample_data_profile: None,
+    sample_analysis_intent: None,
+    make_execution_plan: object,
 ) -> None:
     _ = set_llm_env
 
@@ -377,7 +367,7 @@ def test_analysis_node_preserves_state(
         user_requirement="Analyze",
         data_profile=sample_data_profile,
         analysis_intent=sample_analysis_intent,
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with (
@@ -391,7 +381,7 @@ def test_analysis_node_preserves_state(
 
 
 @pytest.mark.unit
-def test_analysis_node_llm_error(set_llm_env: None) -> None:
+def test_analysis_node_llm_error(set_llm_env: None, make_execution_plan: object) -> None:
     _ = set_llm_env
 
     mock_llm = MagicMock()
@@ -400,7 +390,7 @@ def test_analysis_node_llm_error(set_llm_env: None) -> None:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
     )
 
     with patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm):
@@ -411,7 +401,9 @@ def test_analysis_node_llm_error(set_llm_env: None) -> None:
 
 
 @pytest.mark.unit
-def test_analysis_node_uses_cleaned_data_path(set_llm_env: None, temp_output_dir: str) -> None:
+def test_analysis_node_uses_cleaned_data_path(
+    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+) -> None:
     _ = set_llm_env
 
     valid_script = (
@@ -432,7 +424,7 @@ def test_analysis_node_uses_cleaned_data_path(set_llm_env: None, temp_output_dir
     state = AgentState(
         file_path="/tmp/original.csv",
         user_requirement="Analyze",
-        execution_plan=_make_plan(),
+        execution_plan=make_execution_plan(),
         preprocessing_result={
             "retry_count": 0,
             "attempts": [],
