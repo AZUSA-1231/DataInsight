@@ -61,7 +61,7 @@ class AgentState(BaseModel):
     analysis_intent: AnalysisIntent | None = None
     execution_plan: ExecutionPlan | None = None
     preprocessing_result: dict[str, Any] | None = None
-    execution_result: dict[str, Any] | None = None
+    analysis_result: dict[str, Any] | None = None
     final_report: str | None = None
     error: str | None = None
     feedback: str | None = None

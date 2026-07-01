@@ -22,18 +22,18 @@ def _make_plan(
         feasibility_map=[],
         model_selections=[],
         preprocessing_steps=(
-        preprocessing_steps
-        if preprocessing_steps is not None
-        else [
-            {
-                "step": 1,
-                "action": "drop_null_rows",
-                "target_columns": ["region"],
-                "urgency": "高优先",
-                "reason": "2% nulls in region column",
-            }
-        ]
-    ),
+            preprocessing_steps
+            if preprocessing_steps is not None
+            else [
+                {
+                    "step": 1,
+                    "action": "drop_null_rows",
+                    "target_columns": ["region"],
+                    "urgency": "高优先",
+                    "reason": "2% nulls in region column",
+                }
+            ]
+        ),
         analysis_steps=[],
         alignment_notes="Test plan.",
     )

@@ -9,29 +9,29 @@ from src.agent.state import AgentState
 logger = logging.getLogger(__name__)
 
 
-def _serialize_execution_result(execution_result: dict[str, object]) -> str:
-    """Serialize execution_result for inclusion in the report prompt."""
-    if "parsed_output" in execution_result:
-        return json.dumps(execution_result["parsed_output"], ensure_ascii=False, indent=2)
-    return json.dumps(execution_result, ensure_ascii=False, indent=2, default=str)
+def _serialize_analysis_result(analysis_result: dict[str, object]) -> str:
+    """Serialize analysis_result.parsed_output for inclusion in the report prompt."""
+    if "parsed_output" in analysis_result:
+        return json.dumps(analysis_result["parsed_output"], ensure_ascii=False, indent=2)
+    return json.dumps(analysis_result, ensure_ascii=False, indent=2, default=str)
 
 
 def _build_full_report_prompt(
     cleaning_insights: str,
     data_profile_json: str,
     analysis_intent_json: str,
-    execution_plan_json: str,
-    execution_result_json: str,
+    alignment_notes: str,
+    analysis_result_json: str,
     user_requirement: str,
 ) -> str:
     return f"""You are a senior data analysis report writer. Assemble a comprehensive,
-reader-friendly Markdown report from the structured analysis-stage outputs below.
+reader-friendly Markdown report from the structured analysis outputs below.
 
 CRITICAL RULES:
 1. Write the report in Chinese — all headings and body text.
 2. Use the EXACT section structure specified below. Do not skip any section.
 3. Condense, don't copy-paste. The inputs can be long; summarize key points.
-4. The "数据与业务对齐备忘" section is MANDATORY per our quality standards.
+4. The "数据与业务对齐备忘" section is MANDATORY.
 5. Be honest about limitations — do not exaggerate confidence.
 
 Report structure (use exactly these headings):
@@ -45,8 +45,8 @@ to the user's question.
 ## 1. 数据画像与清洗
 Summarize the Data Profile and Cleaning Insights:
 - Dataset shape and key columns
-- Data quality grade and issues found
-- Cleaning actions recommended and performed
+- Data quality issues found
+- Cleaning actions performed
 
 ## 2. 业务分析意图
 Summarize the Analysis Intent:
@@ -55,13 +55,14 @@ Summarize the Analysis Intent:
 - Key dimensions and comparison baselines
 
 ## 3. 分析执行与结果
-From the execution results:
-- What cleaning actions were performed
+From the analysis results:
 - Key statistical findings
 - Chart descriptions and what each reveals
 - Notable insights discovered
 
 ## 4. 数据与业务对齐备忘 ← MANDATORY
+Context: {alignment_notes}
+
 - What the business wanted to know vs. what the data could actually answer
 - Gaps between ideal metrics and available data
 - Trade-offs and proxy metrics used
@@ -96,15 +97,9 @@ List all generated charts with brief descriptions.
 
 ---
 
-**ANALYSIS EXECUTION PLAN (JSON):**
+**ANALYSIS RESULTS (JSON):**
 
-{execution_plan_json}
-
----
-
-**EXECUTION RESULTS (JSON):**
-
-{execution_result_json}
+{analysis_result_json}
 
 ---
 
@@ -118,14 +113,14 @@ def _build_partial_report_prompt(
     cleaning_insights: str,
     data_profile_json: str,
     analysis_intent_json: str,
-    execution_plan_json: str,
+    alignment_notes: str,
     error_message: str,
     user_requirement: str,
 ) -> str:
     return f"""You are a senior data analysis report writer. The analysis pipeline
-encountered an ERROR during the execution phase (sandbox code generation/execution).
-Generate a PARTIAL report with what we have — the data profile, cleaning insights,
-and execution plan are still valuable.
+encountered an ERROR during the execution phase. Generate a PARTIAL report with
+what we have — the data profile, cleaning insights, and business analysis are
+still valuable.
 
 CRITICAL RULES:
 1. Write in Chinese. Clearly mark the report as **[部分报告 — 分析执行未完成]**.
@@ -138,7 +133,7 @@ Report structure:
 
 ## 执行摘要
 Explain: the pipeline completed data profiling and business analysis successfully,
-but the automated code execution phase failed. The report below contains all
+but the automated analysis phase failed. The report below contains all
 pre-execution findings.
 
 ## 1. 数据画像与清洗
@@ -148,11 +143,13 @@ pre-execution findings.
 (Summarize analysis_intent)
 
 ## 3. 分析执行计划 (未执行)
-(Summarize execution_plan — what WAS planned but not run)
+Context: {alignment_notes}
+
+(Summarize what WAS planned but not executed)
 
 ## 4. 执行错误说明
 Explain the error in accessible terms:
-- What went wrong during code execution
+- What went wrong during analysis execution
 - Whether this is a data issue or a system issue
 - What the user can try (rephrase requirement? clean data manually?)
 
@@ -184,12 +181,6 @@ What the user can do next.
 
 ---
 
-**ANALYSIS EXECUTION PLAN (JSON):**
-
-{execution_plan_json}
-
----
-
 **USER'S ORIGINAL QUESTION:**
 
 {user_requirement}
@@ -201,7 +192,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
     alignment notes.
 
     Reads: state.cleaning_insights, state.data_profile, state.analysis_intent,
-           state.execution_plan, state.execution_result, state.error,
+           state.execution_plan, state.analysis_result, state.error,
            state.user_requirement
     Writes: state.final_report
     """
@@ -209,35 +200,35 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
     data_profile = state.data_profile
     analysis_intent = state.analysis_intent
     execution_plan = state.execution_plan
-    execution_result = state.execution_result or {}
+    analysis_result = state.analysis_result or {}
     error = state.error
     user_requirement = state.user_requirement
 
     data_profile_json = data_profile.model_dump_json(indent=2) if data_profile else "{}"
     intent_json = analysis_intent.model_dump_json(indent=2) if analysis_intent else "{}"
-    plan_json = execution_plan.model_dump_json(indent=2) if execution_plan else "{}"
+    alignment_notes = execution_plan.alignment_notes if execution_plan else "无"
 
-    has_execution_results = bool(execution_result.get("parsed_output") and not error)
+    has_results = bool(analysis_result.get("parsed_output") and not error)
 
-    if has_execution_results:
+    if has_results:
         logger.info("Report Gen: assembling full report")
-        result_json = _serialize_execution_result(execution_result)
+        result_json = _serialize_analysis_result(analysis_result)
         prompt = _build_full_report_prompt(
             cleaning_insights,
             data_profile_json,
             intent_json,
-            plan_json,
+            alignment_notes,
             result_json,
             user_requirement,
         )
     else:
-        logger.info("Report Gen: assembling partial report (execution failed or missing)")
-        error_msg = error or "Execution did not produce results."
+        logger.info("Report Gen: assembling partial report (analysis failed or missing)")
+        error_msg = error or "Analysis did not produce results."
         prompt = _build_partial_report_prompt(
             cleaning_insights,
             data_profile_json,
             intent_json,
-            plan_json,
+            alignment_notes,
             error_msg,
             user_requirement,
         )

@@ -51,17 +51,15 @@ def set_llm_env() -> None:
 
 
 @pytest.fixture
-def sample_execution_result() -> dict:
-    """A successful execution_result for report_gen and graph integration tests."""
+def sample_analysis_result() -> dict:
+    """A successful analysis_result for report_gen and graph integration tests."""
     return {
         "retry_count": 0,
         "attempts": [],
         "script_path": "/tmp/datainsight_test_script.py",
         "output_dir": "/tmp/datainsight_test_out",
-        "stdout": '{"cleaned_shape": {"rows": 100, "cols": 5}}',
+        "stdout": '{"charts": ["out/sales_trend.png"], "statistics": {}, "insights": []}',
         "parsed_output": {
-            "cleaned_shape": {"rows": 100, "cols": 5},
-            "cleaning_actions": ["Dropped 3 rows with null values", "Imputed age with median"],
             "charts": ["out/sales_trend.png", "out/revenue_by_region.png"],
             "statistics": {"correlations": {"sales": {"revenue": 0.85}}},
             "insights": ["Sales peaked in Q3", "Revenue correlates with marketing spend"],

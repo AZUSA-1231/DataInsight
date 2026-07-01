@@ -7,7 +7,7 @@ import pytest
 from src.agent.nodes.report_gen import (
     _build_full_report_prompt,
     _build_partial_report_prompt,
-    _serialize_execution_result,
+    _serialize_analysis_result,
     report_gen_node,
 )
 from src.agent.state import AgentState, ExecutionPlan
@@ -24,27 +24,29 @@ def _make_plan() -> ExecutionPlan:
 
 
 @pytest.mark.unit
-def test_serialize_execution_result_with_parsed_output() -> None:
-    exec_result = {
-        "retry_count": 0,
-        "parsed_output": {
-            "cleaned_shape": {"rows": 100, "cols": 5},
-            "charts": ["out/chart1.png"],
-            "insights": ["Sales rose in Q3"],
-        },
-    }
-    result = _serialize_execution_result(exec_result)
-    assert "cleaned_shape" in result
+def test_serialize_analysis_result_with_parsed_output() -> None:
+    result = _serialize_analysis_result(
+        {
+            "retry_count": 0,
+            "parsed_output": {
+                "charts": ["out/chart1.png"],
+                "statistics": {"correlations": {"sales_revenue": 0.85}},
+                "insights": ["Sales rose in Q3"],
+            },
+        }
+    )
+    assert "charts" in result
     assert "Sales rose in Q3" in result
 
 
 @pytest.mark.unit
-def test_serialize_execution_result_without_parsed_output() -> None:
-    exec_result = {
-        "retry_count": 3,
-        "attempts": [{"code": "x", "error": "fail"}],
-    }
-    result = _serialize_execution_result(exec_result)
+def test_serialize_analysis_result_without_parsed_output() -> None:
+    result = _serialize_analysis_result(
+        {
+            "retry_count": 3,
+            "attempts": [{"code": "x", "error": "fail"}],
+        }
+    )
     assert "retry_count" in result
     assert "3" in result
 
@@ -57,8 +59,8 @@ def test_build_full_report_prompt_structure(
         "清洗建议内容。",
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
-        _make_plan().model_dump_json(indent=2),
-        '{"insights": ["test"]}',
+        "数据与业务对齐备忘：测试。",
+        '{"charts": ["out/chart1.png"], "statistics": {}, "insights": ["test"]}',
         "Why did sales drop?",
     )
 
@@ -72,13 +74,18 @@ def test_build_full_report_prompt_structure(
     assert "局限性与后续建议" in prompt
     assert "Why did sales drop?" in prompt
     assert "清洗建议内容" in prompt
-    assert "feasibility_map" in prompt
+    assert "数据与业务对齐备忘：测试" in prompt
 
 
 @pytest.mark.unit
 def test_build_full_report_prompt_mandatory_alignment() -> None:
     prompt = _build_full_report_prompt(
-        "CI", "{}", "{}", _make_plan().model_dump_json(indent=2), "{}", "question"
+        "CI",
+        "{}",
+        "{}",
+        "对齐备忘。",
+        "{}",
+        "question",
     )
     assert "MANDATORY" in prompt
 
@@ -91,7 +98,7 @@ def test_build_partial_report_prompt_structure(
         "清洗建议。",
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
-        _make_plan().model_dump_json(indent=2),
+        "对齐备忘。",
         "NameError: 'df' not defined",
         "Why?",
     )
@@ -106,7 +113,7 @@ def test_build_partial_report_prompt_structure(
 @pytest.mark.unit
 def test_report_gen_node_full_report(
     set_llm_env: None,
-    sample_execution_result: dict,
+    sample_analysis_result: dict,
     sample_data_profile: object,
     sample_analysis_intent: object,
 ) -> None:
@@ -124,7 +131,7 @@ def test_report_gen_node_full_report(
         cleaning_insights="## 数据清洗建议\n清洗。",
         analysis_intent=sample_analysis_intent,
         execution_plan=_make_plan(),
-        execution_result=sample_execution_result,
+        analysis_result=sample_analysis_result,
     )
 
     with patch("src.agent.nodes.report_gen.get_llm", return_value=mock_llm):
@@ -156,7 +163,7 @@ def test_report_gen_node_partial_report(
         cleaning_insights="清洗建议。",
         analysis_intent=sample_analysis_intent,
         execution_plan=_make_plan(),
-        error="Execution error (attempt 3/3): NameError",
+        error="Analysis error (attempt 3/3): NameError",
     )
 
     with patch("src.agent.nodes.report_gen.get_llm", return_value=mock_llm):
@@ -169,7 +176,7 @@ def test_report_gen_node_partial_report(
 @pytest.mark.unit
 def test_report_gen_node_preserves_state(
     set_llm_env: None,
-    sample_execution_result: dict,
+    sample_analysis_result: dict,
     sample_data_profile: object,
     sample_analysis_intent: object,
 ) -> None:
@@ -187,7 +194,7 @@ def test_report_gen_node_preserves_state(
         cleaning_insights="CI",
         analysis_intent=sample_analysis_intent,
         execution_plan=_make_plan(),
-        execution_result=sample_execution_result,
+        analysis_result=sample_analysis_result,
     )
 
     with patch("src.agent.nodes.report_gen.get_llm", return_value=mock_llm):

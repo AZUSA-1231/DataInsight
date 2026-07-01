@@ -5,10 +5,10 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from src.agent.nodes.analysis import analysis_node
 from src.agent.nodes.business_track import business_track_node
 from src.agent.nodes.data_track import data_track_node
 from src.agent.nodes.decision_match import decision_match_node
-from src.agent.nodes.execution import execution_node
 from src.agent.nodes.preprocessing import preprocessing_node
 from src.agent.nodes.report_gen import report_gen_node
 from src.agent.state import AgentState
@@ -16,19 +16,19 @@ from src.agent.state import AgentState
 
 def _should_retry_preprocessing(
     state: AgentState,
-) -> Literal["preprocessing", "execution", "report_gen"]:
+) -> Literal["preprocessing", "analysis", "report_gen"]:
     retry_count = (state.preprocessing_result or {}).get("retry_count", 0)
     if state.error and retry_count < 3:
         return "preprocessing"
     if state.error and retry_count >= 3:
         return "report_gen"
-    return "execution"
+    return "analysis"
 
 
-def _should_retry_execution(state: AgentState) -> Literal["execution", "report_gen"]:
-    retry_count = (state.execution_result or {}).get("retry_count", 0)
+def _should_retry_analysis(state: AgentState) -> Literal["analysis", "report_gen"]:
+    retry_count = (state.analysis_result or {}).get("retry_count", 0)
     if state.error and retry_count < 3:
-        return "execution"
+        return "analysis"
     return "report_gen"
 
 
@@ -52,17 +52,22 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
               decision_match
                    |
                    v
-              execution
-                /     \\
-        (success)   (error → ReAct × 3)
-              /         \\
-             v           v
-        report_gen   report_gen (partial)
-             |
-             v
-            END
-             ^
-             |___ feedback → decision_match
+              preprocessing
+                /      \\
+       (success)    (error → ReAct × 3)
+              /          \\
+             v            v
+         analysis      report_gen (partial)
+           /   \\
+   (success)  (error → ReAct × 3)
+         /       \\
+        v         v
+   report_gen   report_gen (partial)
+        |
+        v
+       END
+        ^
+        |___ feedback → decision_match
     """
     graph = StateGraph(AgentState)
 
@@ -70,7 +75,7 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
     graph.add_node("business_track", business_track_node)
     graph.add_node("decision_match", decision_match_node)
     graph.add_node("preprocessing", preprocessing_node)
-    graph.add_node("execution", execution_node)
+    graph.add_node("analysis", analysis_node)
     graph.add_node("report_gen", report_gen_node)
 
     # Parallel fan-out from START to both tracks
@@ -87,15 +92,16 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
         _should_retry_preprocessing,
         {
             "preprocessing": "preprocessing",
-            "execution": "execution",
+            "analysis": "analysis",
             "report_gen": "report_gen",
         },
     )
 
+    # Analysis → Report Gen (with ReAct retry, fallback to report_gen)
     graph.add_conditional_edges(
-        "execution",
-        _should_retry_execution,
-        {"execution": "execution", "report_gen": "report_gen"},
+        "analysis",
+        _should_retry_analysis,
+        {"analysis": "analysis", "report_gen": "report_gen"},
     )
     graph.add_conditional_edges(
         "report_gen",

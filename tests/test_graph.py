@@ -8,7 +8,7 @@ import pytest
 
 from src.agent.graph import (
     _should_iterate,
-    _should_retry_execution,
+    _should_retry_analysis,
     _should_retry_preprocessing,
     build_graph,
 )
@@ -118,7 +118,7 @@ def test_graph_node_names() -> None:
     assert "business_track" in node_names
     assert "decision_match" in node_names
     assert "preprocessing" in node_names
-    assert "execution" in node_names
+    assert "analysis" in node_names
     assert "report_gen" in node_names
 
 
@@ -139,8 +139,8 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
 
-    mock_ex = MagicMock()
-    mock_ex.invoke.return_value = MagicMock(content="print('{}')\n")
+    mock_an = MagicMock()
+    mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
 
     from src.sandbox.executor import SandboxResult
 
@@ -154,7 +154,7 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
         timed_out=False,
     )
 
-    ex_sandbox_result = SandboxResult(
+    an_sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 5, "cols": 2}}',
         stderr="",
         exit_code=0,
@@ -174,8 +174,8 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
         patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
-        patch("src.agent.nodes.execution.get_llm", return_value=mock_ex),
-        patch("src.agent.nodes.execution.run_script", return_value=ex_sandbox_result),
+        patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
+        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         contextlib.suppress(NotImplementedError),
     ):
         graph.invoke(state)
@@ -184,7 +184,7 @@ def test_graph_data_track_integration(sample_csv_path: str, set_llm_env: None) -
     mock_dt.invoke.assert_called_once()
     mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
-    mock_ex.invoke.assert_called_once()
+    mock_an.invoke.assert_called_once()
 
 
 @pytest.mark.integration
@@ -250,13 +250,13 @@ def test_graph_m3_execution_integration(
     sample_csv_path: str, set_llm_env: None, temp_output_dir: str
 ) -> None:
     """Full M1+M2+M3a+M3b pipeline: data_track, business_track, decision_match,
-    preprocessing, execution with mocked LLMs and sandbox."""
+    preprocessing, analysis with mocked LLMs and sandbox."""
     _ = set_llm_env
 
+    from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
     from src.agent.nodes.decision_match import decision_match_node
-    from src.agent.nodes.execution import execution_node
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.sandbox.executor import SandboxResult
 
@@ -272,8 +272,8 @@ def test_graph_m3_execution_integration(
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
 
-    mock_ex = MagicMock()
-    mock_ex.invoke.return_value = MagicMock(content="print('{}')\n")
+    mock_an = MagicMock()
+    mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
 
     pre_sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 10, "cols": 3},'
@@ -284,7 +284,7 @@ def test_graph_m3_execution_integration(
         timed_out=False,
     )
 
-    ex_sandbox_result = SandboxResult(
+    an_sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 10, "cols": 3},'
         ' "cleaning_actions": ["dropped nulls"],'
         ' "charts": ["out/chart1.png"],'
@@ -306,8 +306,8 @@ def test_graph_m3_execution_integration(
         patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
-        patch("src.agent.nodes.execution.get_llm", return_value=mock_ex),
-        patch("src.agent.nodes.execution.run_script", return_value=ex_sandbox_result),
+        patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
+        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
     ):
         dt_update = data_track_node(state)
         state = AgentState(**(state.model_dump() | dt_update))
@@ -317,8 +317,8 @@ def test_graph_m3_execution_integration(
         state = AgentState(**(state.model_dump() | dm_update))
         pre_update = preprocessing_node(state)
         state = AgentState(**(state.model_dump() | pre_update))
-        ex_update = execution_node(state)
-        state = AgentState(**(state.model_dump() | ex_update))
+        an_update = analysis_node(state)
+        state = AgentState(**(state.model_dump() | an_update))
 
     assert state.data_profile is not None
     assert state.analysis_intent is not None
@@ -327,10 +327,10 @@ def test_graph_m3_execution_integration(
     assert state.preprocessing_result is not None
     assert state.preprocessing_result["skipped"] is True
     assert state.preprocessing_result["cleaned_data_path"] == sample_csv_path
-    assert state.execution_result is not None
+    assert state.analysis_result is not None
     assert state.error is None
 
-    result = state.execution_result
+    result = state.analysis_result
     assert "parsed_output" in result
     assert result["parsed_output"]["insights"] == ["Sales rose in Q3"]
     assert result["retry_count"] == 0
@@ -338,16 +338,16 @@ def test_graph_m3_execution_integration(
     mock_dt.invoke.assert_called_once()
     mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
-    mock_ex.invoke.assert_called_once()
+    mock_an.invoke.assert_called_once()
 
 
 @pytest.mark.unit
 def test_graph_conditional_edges_preprocessing() -> None:
     """Verify the preprocessing ReAct retry routing logic."""
 
-    # Success (no error) — go to execution
+    # Success (no error) — go to analysis
     state_ok = AgentState(file_path="", user_requirement="")
-    assert _should_retry_preprocessing(state_ok) == "execution"
+    assert _should_retry_preprocessing(state_ok) == "analysis"
 
     # Error + retry_count < 3 — retry preprocessing
     state_retry = AgentState(
@@ -369,46 +369,46 @@ def test_graph_conditional_edges_preprocessing() -> None:
 
 
 @pytest.mark.unit
-def test_graph_conditional_edges() -> None:
-    """Verify the execution ReAct retry routing logic."""
+def test_graph_conditional_edges_analysis() -> None:
+    """Verify the analysis ReAct retry routing logic."""
 
     # No error — go to report_gen
     state_no_error = AgentState(file_path="", user_requirement="")
-    assert _should_retry_execution(state_no_error) == "report_gen"
+    assert _should_retry_analysis(state_no_error) == "report_gen"
 
-    # Error + retry_count < 3 — retry execution
+    # Error + retry_count < 3 — retry analysis
     state_with_error = AgentState(
         file_path="",
         user_requirement="",
         error="something failed",
-        execution_result={"retry_count": 1},
+        analysis_result={"retry_count": 1},
     )
-    assert _should_retry_execution(state_with_error) == "execution"
+    assert _should_retry_analysis(state_with_error) == "analysis"
 
     # Error + retry_count >= 3 — give up, go to report_gen
     state_max_retries = AgentState(
         file_path="",
         user_requirement="",
         error="failed again",
-        execution_result={"retry_count": 3},
+        analysis_result={"retry_count": 3},
     )
-    assert _should_retry_execution(state_max_retries) == "report_gen"
+    assert _should_retry_analysis(state_max_retries) == "report_gen"
 
 
 @pytest.mark.integration
 def test_graph_m4_full_pipeline(
     sample_csv_path: str,
     set_llm_env: None,
-    sample_execution_result: dict,
+    sample_analysis_result: dict,
 ) -> None:
     """Full 6-node pipeline: data_track → business_track → decision_match →
-    preprocessing → execution → report_gen."""
+    preprocessing → analysis → report_gen."""
     _ = set_llm_env
 
+    from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
     from src.agent.nodes.decision_match import decision_match_node
-    from src.agent.nodes.execution import execution_node
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.agent.nodes.report_gen import report_gen_node
     from src.sandbox.executor import SandboxResult
@@ -425,8 +425,8 @@ def test_graph_m4_full_pipeline(
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
 
-    mock_ex = MagicMock()
-    mock_ex.invoke.return_value = MagicMock(content="print('{}')\n")
+    mock_an = MagicMock()
+    mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
 
     mock_rg = MagicMock()
     mock_rg.invoke.return_value = MagicMock(
@@ -443,7 +443,7 @@ def test_graph_m4_full_pipeline(
         timed_out=False,
     )
 
-    ex_sandbox_result = SandboxResult(
+    an_sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 10, "cols": 3}}',
         stderr="",
         exit_code=0,
@@ -461,8 +461,8 @@ def test_graph_m4_full_pipeline(
         patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
-        patch("src.agent.nodes.execution.get_llm", return_value=mock_ex),
-        patch("src.agent.nodes.execution.run_script", return_value=ex_sandbox_result),
+        patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
+        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         dt_update = data_track_node(state)
@@ -473,8 +473,8 @@ def test_graph_m4_full_pipeline(
         state = AgentState(**(state.model_dump() | dm_update))
         pre_update = preprocessing_node(state)
         state = AgentState(**(state.model_dump() | pre_update))
-        ex_update = execution_node(state)
-        state = AgentState(**(state.model_dump() | ex_update))
+        an_update = analysis_node(state)
+        state = AgentState(**(state.model_dump() | an_update))
         rg_update = report_gen_node(state)
         state = AgentState(**(state.model_dump() | rg_update))
 
@@ -489,16 +489,16 @@ def test_graph_m4_full_pipeline(
 @pytest.mark.integration
 def test_graph_feedback_iteration(
     set_llm_env: None,
-    sample_execution_result: dict,
+    sample_analysis_result: dict,
     sample_data_profile: object,
     sample_analysis_intent: object,
 ) -> None:
     """Feedback loop: user feedback → decision_match revises → preprocessing →
-    execution → report_gen regenerates."""
+    analysis → report_gen regenerates."""
     _ = set_llm_env
 
+    from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.decision_match import decision_match_node
-    from src.agent.nodes.execution import execution_node
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.agent.nodes.report_gen import report_gen_node
     from src.sandbox.executor import SandboxResult
@@ -510,7 +510,6 @@ def test_graph_feedback_iteration(
         cleaning_insights="## 数据清洗建议\nClean.",
         analysis_intent=sample_analysis_intent,
         execution_plan=_make_plan(),
-        execution_result=sample_execution_result,
         feedback="The chart on regional sales is wrong, use monthly data instead.",
     )
 
@@ -520,8 +519,8 @@ def test_graph_feedback_iteration(
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
 
-    mock_ex = MagicMock()
-    mock_ex.invoke.return_value = MagicMock(content="print('{}')\n")
+    mock_an = MagicMock()
+    mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
 
     mock_rg = MagicMock()
     mock_rg.invoke.return_value = MagicMock(content="# DataInsight 数据分析报告\n\nRevised report.")
@@ -536,7 +535,7 @@ def test_graph_feedback_iteration(
         timed_out=False,
     )
 
-    ex_sandbox_result = SandboxResult(
+    an_sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 10, "cols": 3}}',
         stderr="",
         exit_code=0,
@@ -547,16 +546,16 @@ def test_graph_feedback_iteration(
         patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
-        patch("src.agent.nodes.execution.get_llm", return_value=mock_ex),
-        patch("src.agent.nodes.execution.run_script", return_value=ex_sandbox_result),
+        patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
+        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         dm_update = decision_match_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
         pre_update = preprocessing_node(state)
         state = AgentState(**(state.model_dump() | pre_update))
-        ex_update = execution_node(state)
-        state = AgentState(**(state.model_dump() | ex_update))
+        an_update = analysis_node(state)
+        state = AgentState(**(state.model_dump() | an_update))
         rg_update = report_gen_node(state)
         state = AgentState(**(state.model_dump() | rg_update))
 

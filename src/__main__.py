@@ -135,7 +135,7 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
             )
         )
 
-    exec_result = state.execution_result or {}
+    exec_result = state.analysis_result or {}
     if exec_result:
         if "parsed_output" in exec_result:
             artifacts.append(
@@ -200,7 +200,8 @@ _STAGE_LABELS: dict[str, str] = {
     "data_track": "Stage 1a — Data Profile",
     "business_track": "Stage 1b — Business Analysis",
     "decision_match": "Stage 2  — Data-Business Alignment",
-    "execution": "Stage 3  — Sandbox Execution",
+    "preprocessing": "Stage 3a — Data Cleaning",
+    "analysis": "Stage 3b — Analysis Execution",
     "report_gen": "Stage 4  — Report Assembly",
 }
 
