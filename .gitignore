@@ -25,6 +25,10 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Claude Code (local-only, not pushed to GitHub)
+CLAUDE.md
+.claude/
+
 # Local settings (may contain personal paths)
 .claude/settings.local.json
 *.csv

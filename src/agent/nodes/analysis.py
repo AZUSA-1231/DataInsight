@@ -4,27 +4,48 @@ import json
 import logging
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 from src.agent.llm import get_llm
-from src.agent.state import AgentState, ExecutionPlan
-from src.agent.utils import _extract_code_block, register_temp_path
-from src.sandbox.executor import SandboxResult, run_script
+from src.agent.state import AgentState, PlanUnit
+from src.agent.utils import _extract_code_block, _extract_json, register_temp_path
+from src.sandbox.executor import DEFAULT_TIMEOUT, SandboxResult, run_script
 from src.sandbox.static_guard import check_static
 
 logger = logging.getLogger(__name__)
 
+_ANALYSIS_TIMEOUT: int
+try:
+    _ANALYSIS_TIMEOUT = int(os.environ.get("DATAINSIGHT_TIMEOUT_ANALYSIS", "120"))
+except ValueError:
+    _ANALYSIS_TIMEOUT = DEFAULT_TIMEOUT
+    logger.warning(
+        "Invalid DATAINSIGHT_TIMEOUT_ANALYSIS, falling back to %ds", DEFAULT_TIMEOUT
+    )
 
-def _serialize_analysis_steps(execution_plan: object) -> str:
-    """Extract analysis_steps from ExecutionPlan as JSON string."""
-    if isinstance(execution_plan, ExecutionPlan):
-        return json.dumps(execution_plan.analysis_steps, indent=2, ensure_ascii=False)
-    return "[]"
+_MAX_WORKERS = 3
+_MAX_RETRIES = 3
 
 
-def _build_analysis_code_prompt(execution_plan: object, file_path: str, output_dir: str) -> str:
-    steps_text = _serialize_analysis_steps(execution_plan)
+def _serialize_unit(unit: PlanUnit) -> str:
+    """Serialize a single PlanUnit as JSON for prompt inclusion."""
+    return json.dumps(
+        {
+            "unit_id": unit.unit_id,
+            "purpose": unit.purpose,
+            "model": unit.model or "auto",
+            "cautious": unit.cautious,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def _build_unit_code_prompt(unit: PlanUnit, file_path: str, output_dir: str) -> str:
+    unit_text = _serialize_unit(unit)
     return f"""You are a senior data analyst. Write a COMPLETE, runnable Python script
-that executes the data analysis steps listed below.
+that executes the SINGLE analysis task described below. Focus ONLY on this one task.
 
 CRITICAL RULES:
 1. The script MUST accept exactly two CLI arguments: sys.argv[1] = data file path,
@@ -42,20 +63,20 @@ CRITICAL RULES:
 9. The LAST line of stdout MUST be a single line of valid JSON:
 
 {{"charts": ["output_dir/chart1.png", ...],
- "statistics": {{"correlations": {{...}}, "distributions": {{...}}}},
+ "statistics": {{"key": "value", ...}},
  "insights": ["insight1", "insight2", ...]}}
 
 10. Do NOT write anything to stdout except the final JSON line. Use stderr for
    progress and debug messages.
-11. Verify column existence and dtypes before operating — the analysis steps may
+11. Verify column existence and dtypes before operating — the analysis task may
    reference columns that don't exist in the actual data.
 12. Include `if __name__ == "__main__":` guard.
 
 ---
 
-**ANALYSIS STEPS (JSON):**
+**ANALYSIS TASK (JSON):**
 
-{steps_text}
+{unit_text}
 
 ---
 
@@ -64,14 +85,14 @@ CRITICAL RULES:
 """
 
 
-def _build_analysis_react_fix_prompt(
-    execution_plan: object,
+def _build_unit_react_fix_prompt(
+    unit: PlanUnit,
     previous_code: str,
     error_message: str,
     file_path: str,
     output_dir: str,
 ) -> str:
-    steps_text = _serialize_analysis_steps(execution_plan)
+    unit_text = _serialize_unit(unit)
     return f"""You are a debugging specialist. The Python analysis script below FAILED.
 Diagnose the root cause and produce a FIXED, complete Python script.
 
@@ -83,12 +104,12 @@ FAILURE ANALYSIS:
      scikit-learn, and Python stdlib. DO NOT try a different import name.
    - **Missing Agg backend**: add `matplotlib.use('Agg')` BEFORE importing pyplot.
    - **Chinese font crash**: add SimHei/DejaVu Sans fallback in rcParams.
-   - **Wrong column names**: check the analysis steps for actual column names.
+   - **Wrong column names**: check the analysis task for actual column names.
    - **Type mismatches / NaN**: add pd.to_numeric(), fillna(), or dropna().
    - **Path / encoding issues**: verify the file exists and encoding is correct.
-   - **Timeout (120s)**: the script was too slow. Replace ALL .iterrows() or nested
-     Python for loops with vectorized pandas. For large datasets, sample down to
-     30K rows first.
+   - **Timeout ({_ANALYSIS_TIMEOUT}s)**: the script was too slow. Replace ALL
+     .iterrows() or nested Python for loops with vectorized pandas. For large
+     datasets, sample down to 30K rows first.
 3. Fix ONLY what's broken — do not rewrite the entire analysis logic.
 
 Same rules as before:
@@ -101,9 +122,9 @@ Same rules as before:
 
 ---
 
-**ANALYSIS STEPS (JSON):**
+**ANALYSIS TASK (JSON):**
 
-{steps_text}
+{unit_text}
 
 ---
 
@@ -128,33 +149,176 @@ Output the FIXED complete Python script (with ```python fence).
 """
 
 
-def analysis_node(state: AgentState) -> dict[str, object]:
-    """Stage 3b — Analysis: generate analysis code, run in sandbox,
-    ReAct retry on error.
+def _execute_unit(
+    unit: PlanUnit,
+    data_path: str,
+    parent_output_dir: str,
+    unit_retry_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute a single PlanUnit: LLM gen → static guard → sandbox → ReAct retry ×3.
 
-    Reads: state.execution_plan.analysis_steps, state.preprocessing_result,
-           state.file_path
+    Returns a dict with: unit_id, status, parsed_output, charts, insights,
+    error, retry_count, scripts, stdout.
+    """
+    unit_id = unit.unit_id
+    unit_output_dir = os.path.join(parent_output_dir, f"unit_{unit_id}")
+    os.makedirs(unit_output_dir, exist_ok=True)
+    register_temp_path(unit_output_dir)
+
+    retry_count = 0
+    attempts: list[dict[str, str]] = []
+    scripts: list[str] = []
+
+    if unit_retry_state:
+        retry_count = unit_retry_state.get("retry_count", 0)
+        attempts = unit_retry_state.get("attempts", [])
+        scripts = unit_retry_state.get("scripts", [])
+
+    while retry_count < _MAX_RETRIES:
+        # Build prompt
+        if retry_count > 0 and attempts:
+            last = attempts[-1]
+            prompt = _build_unit_react_fix_prompt(
+                unit, last["code"], last["error"], data_path, unit_output_dir
+            )
+            logger.info("Analysis unit [%d]: ReAct retry %d/%d", unit_id, retry_count, _MAX_RETRIES)
+        else:
+            prompt = _build_unit_code_prompt(unit, data_path, unit_output_dir)
+            logger.info("Analysis unit [%d]: generating script (fresh)", unit_id)
+
+        # LLM call
+        try:
+            llm = get_llm(temperature=0, node="analysis")
+            response = llm.invoke(prompt)
+            raw = response.content if hasattr(response, "content") else str(response)
+            code = str(raw) if not isinstance(raw, str) else raw
+        except Exception as e:
+            logger.error("Analysis unit [%d]: LLM call failed: %s", unit_id, e)
+            retry_count += 1
+            attempts.append({"code": "", "error": f"LLM error: {e}"})
+            if retry_count >= _MAX_RETRIES:
+                break
+            continue
+
+        code = _extract_code_block(code)
+
+        # Static guard
+        safe, reason = check_static(code)
+        if not safe:
+            logger.error("Analysis unit [%d]: static guard rejected: %s", unit_id, reason)
+            retry_count += 1
+            attempts.append({"code": code, "error": reason})
+            if retry_count >= _MAX_RETRIES:
+                break
+            continue
+
+        # Write script
+        fd, script_path = tempfile.mkstemp(
+            suffix=".py", prefix=f"datainsight_analysis_u{unit_id}_"
+        )
+        register_temp_path(script_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(code)
+        scripts.append(script_path)
+        logger.info(
+            "Analysis unit [%d]: script written to %s (%d bytes)",
+            unit_id, script_path, len(code),
+        )
+
+        # Sandbox execution
+        result: SandboxResult = run_script(
+            script_path, [data_path, unit_output_dir], timeout_seconds=_ANALYSIS_TIMEOUT
+        )
+
+        if result.exit_code == 0:
+            try:
+                json_text = _extract_json(result.stdout)
+                parsed = json.loads(json_text)
+            except (json.JSONDecodeError, IndexError):
+                error_msg = (
+                    f"Analysis script exited 0 but produced invalid JSON. "
+                    f"stdout preview: {result.stdout[:300]}"
+                )
+                logger.error("Analysis unit [%d]: %s", unit_id, error_msg)
+                retry_count += 1
+                attempts.append({"code": code, "error": error_msg})
+                if retry_count >= _MAX_RETRIES:
+                    break
+                continue
+
+            logger.info("Analysis unit [%d]: SUCCESS (attempt %d)", unit_id, retry_count + 1)
+            return {
+                "unit_id": unit_id,
+                "status": "success",
+                "parsed_output": parsed,
+                "charts": parsed.get("charts", []),
+                "insights": parsed.get("insights", []),
+                "statistics": parsed.get("statistics", {}),
+                "error": None,
+                "retry_count": retry_count,
+                "scripts": scripts,
+                "stdout": result.stdout,
+                "output_dir": unit_output_dir,
+            }
+
+        error_msg = (
+            (result.stderr or "").strip()
+            or (result.stdout or "").strip()
+            or f"Exit code {result.exit_code}"
+        )
+        if result.timed_out:
+            error_msg = f"[TIMEOUT after {_ANALYSIS_TIMEOUT}s]\n{error_msg}"
+
+        logger.error(
+            "Analysis unit [%d]: FAILED (attempt %d/%d): %s",
+            unit_id, retry_count + 1, _MAX_RETRIES, error_msg[:200],
+        )
+        retry_count += 1
+        attempts.append({"code": code, "error": error_msg})
+
+    # Exhausted retries
+    return {
+        "unit_id": unit_id,
+        "status": "failed",
+        "parsed_output": None,
+        "charts": [],
+        "insights": [],
+        "statistics": {},
+        "error": (
+            f"Unit {unit_id} failed after {_MAX_RETRIES} retries: "
+            f"{attempts[-1]['error'][:300] if attempts else 'unknown'}"
+        ),
+        "retry_count": retry_count,
+        "scripts": scripts,
+        "stdout": "",
+        "output_dir": unit_output_dir,
+    }
+
+
+def analysis_node(state: AgentState) -> dict[str, object]:
+    """Stage 3b — Analysis: execute each PlanUnit independently with parallel
+    sandbox via ThreadPoolExecutor.
+
+    Reads: state.plan.units, state.preprocessing_result, state.file_path
     Writes: state.analysis_result, state.error
     """
-    execution_plan = state.execution_plan
+    plan = state.plan
 
-    if not execution_plan:
-        logger.error("Analysis: execution_plan is missing from state")
+    if not plan:
+        logger.error("Analysis: no Plan available")
         return {
-            "error": "Analysis: execution_plan not available (Decision Match may have failed)",
-            "analysis_result": {"retry_count": 3, "attempts": []},
+            "error": "Analysis: plan not available (Planner may have failed)",
+            "analysis_result": {"unit_results": [], "status": "failed"},
         }
 
-    if not execution_plan.analysis_steps:
-        logger.info("Analysis: no analysis steps — skipping")
+    units = plan.units
+    if not units:
+        logger.info("Analysis: no analysis units — skipping")
         return {
             "analysis_result": {
-                "retry_count": 0,
-                "attempts": [],
+                "unit_results": [],
+                "status": "complete",
                 "skipped": True,
-                "charts": [],
-                "statistics": {},
-                "insights": [],
             },
             "error": None,
         }
@@ -162,115 +326,78 @@ def analysis_node(state: AgentState) -> dict[str, object]:
     # Resolve input data path: prefer cleaned data from preprocessing
     pre_result = state.preprocessing_result or {}
     parsed = pre_result.get("parsed_output") or {}
-    data_path = (
-        pre_result.get("cleaned_data_path") or parsed.get("cleaned_data_path") or state.file_path
-    )
+    data_path = parsed.get("cleaned_data_path") or state.file_path
 
+    # Shared parent output dir for all units
     an_result = state.analysis_result or {}
-    retry_count = an_result.get("retry_count", 0)
-    attempts: list[dict[str, str]] = an_result.get("attempts", [])
-
-    output_dir = an_result.get("output_dir") or tempfile.mkdtemp(prefix="datainsight_analysis_")
-    if "output_dir" not in an_result:
-        register_temp_path(output_dir)
-
-    if retry_count > 0 and attempts:
-        last = attempts[-1]
-        prompt = _build_analysis_react_fix_prompt(
-            execution_plan, last["code"], last["error"], data_path, output_dir
-        )
-        logger.info("Analysis: ReAct retry %d/3", retry_count)
-    else:
-        prompt = _build_analysis_code_prompt(execution_plan, data_path, output_dir)
-        logger.info("Analysis: generating analysis script (fresh)")
-
-    try:
-        llm = get_llm(temperature=0)
-        response = llm.invoke(prompt)
-        raw = response.content if hasattr(response, "content") else str(response)
-        code = str(raw) if not isinstance(raw, str) else raw
-    except Exception as e:
-        logger.error("Analysis: LLM call failed: %s", e)
-        return {
-            "error": f"Analysis LLM error: {e}",
-            "analysis_result": {
-                "retry_count": retry_count + 1,
-                "attempts": attempts,
-                "output_dir": output_dir,
-            },
-        }
-
-    code = _extract_code_block(code)
-
-    safe, reason = check_static(code)
-    if not safe:
-        logger.error("Analysis: static guard rejected code: %s", reason)
-        attempts.append({"code": code, "error": reason})
-        return {
-            "error": f"Analysis: unsafe code rejected — {reason}",
-            "analysis_result": {
-                "retry_count": retry_count + 1,
-                "attempts": attempts,
-                "output_dir": output_dir,
-            },
-        }
-
-    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="datainsight_analysis_")
-    register_temp_path(script_path)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(code)
-    logger.info("Analysis: script written to %s (%d bytes)", script_path, len(code))
-
-    result: SandboxResult = run_script(script_path, [data_path, output_dir])
-
-    if result.exit_code == 0:
-        try:
-            parsed = json.loads(result.stdout.strip().splitlines()[-1])
-        except (json.JSONDecodeError, IndexError):
-            error_msg = (
-                "Analysis script exited 0 but produced invalid JSON. "
-                f"stdout preview: {result.stdout[:300]}"
-            )
-            logger.error("Analysis: %s", error_msg)
-            attempts.append({"code": code, "error": error_msg})
-            return {
-                "error": error_msg,
-                "analysis_result": {
-                    "retry_count": retry_count + 1,
-                    "attempts": attempts,
-                    "output_dir": output_dir,
-                },
-            }
-
-        logger.info("Analysis: SUCCESS (attempt %d)", retry_count + 1)
-        return {
-            "analysis_result": {
-                "retry_count": retry_count,
-                "attempts": attempts,
-                "script_path": script_path,
-                "output_dir": output_dir,
-                "stdout": result.stdout,
-                "parsed_output": parsed,
-            },
-            "error": None,
-        }
-
-    error_msg = (
-        (result.stderr or "").strip()
-        or (result.stdout or "").strip()
-        or f"Exit code {result.exit_code}"
+    parent_output_dir = an_result.get("output_dir") or tempfile.mkdtemp(
+        prefix="datainsight_analysis_"
     )
-    if result.timed_out:
-        error_msg = f"[TIMEOUT after 120s]\n{error_msg}"
+    if "output_dir" not in an_result:
+        register_temp_path(parent_output_dir)
 
-    logger.error("Analysis: FAILED (attempt %d/3): %s", retry_count + 1, error_msg[:200])
-    attempts.append({"code": code, "error": error_msg})
+    # Restore per-unit retry state from previous partial runs
+    prev_unit_results: dict[int, dict[str, Any]] = {}
+    for ur in an_result.get("unit_results", []):
+        prev_unit_results[ur["unit_id"]] = ur
+
+    logger.info(
+        "Analysis: executing %d unit(s) with ThreadPoolExecutor(max_workers=%d)",
+        len(units), _MAX_WORKERS,
+    )
+
+    unit_results: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+        futures = {}
+        for unit in units:
+            prev = prev_unit_results.get(unit.unit_id)
+            future = executor.submit(_execute_unit, unit, data_path, parent_output_dir, prev)
+            futures[future] = unit.unit_id
+
+        for future in as_completed(futures):
+            unit_id = futures[future]
+            try:
+                result = future.result()
+                unit_results.append(result)
+                if result["status"] == "failed":
+                    errors.append(f"Unit {unit_id}: {result.get('error', 'unknown')}")
+            except Exception as e:
+                logger.error("Analysis unit [%d]: executor failed: %s", unit_id, e)
+                unit_results.append({
+                    "unit_id": unit_id,
+                    "status": "failed",
+                    "parsed_output": None,
+                    "charts": [],
+                    "insights": [],
+                    "statistics": {},
+                    "error": f"Executor error: {e}",
+                    "retry_count": 0,
+                    "scripts": [],
+                    "stdout": "",
+                    "output_dir": os.path.join(parent_output_dir, f"unit_{unit_id}"),
+                })
+                errors.append(f"Unit {unit_id}: executor error: {e}")
+
+    # Sort by unit_id for deterministic output
+    unit_results.sort(key=lambda r: r["unit_id"])
+
+    all_success = all(r["status"] == "success" for r in unit_results)
+    status = "complete" if all_success else "partial"
+
+    logger.info(
+        "Analysis: %d/%d units succeeded (status=%s)",
+        sum(1 for r in unit_results if r["status"] == "success"),
+        len(unit_results),
+        status,
+    )
 
     return {
-        "error": f"Analysis error (attempt {retry_count + 1}/3): {error_msg[:500]}",
         "analysis_result": {
-            "retry_count": retry_count + 1,
-            "attempts": attempts,
-            "output_dir": output_dir,
+            "unit_results": unit_results,
+            "status": status,
+            "output_dir": parent_output_dir,
         },
+        "error": "; ".join(errors) if errors else None,
     }

@@ -26,6 +26,9 @@ _REQUIREMENT_MAX_LENGTH = 2000
 _FEEDBACK_MAX_LENGTH = 1000
 _ALLOWED_EXTENSIONS: set[str] = {".csv", ".xlsx", ".xls"}
 
+# Strip existing unit_N_ prefix from chart filenames to avoid double-prefixing
+_RE_UNIT_PREFIX = re.compile(r"^unit\d+_")
+
 # Prompt injection delimiters — stripped from user input
 _INJECTION_DELIMITERS = re.compile(
     r"```|"
@@ -175,61 +178,110 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
                 _json.dumps(state.analysis_intent.model_dump(), ensure_ascii=False, indent=2),
             )
         )
-    if state.execution_plan:
+    if state.plan:
         artifacts.append(
             (
-                "execution_plan.json",
-                _json.dumps(state.execution_plan.model_dump(), ensure_ascii=False, indent=2),
+                "plan.json",
+                _json.dumps(state.plan.model_dump(), ensure_ascii=False, indent=2),
             )
         )
+    # Per-unit analysis results
+    an_result = state.analysis_result or {}
+    unit_results = an_result.get("unit_results", [])
+    if unit_results:
+        # Summary JSON of all unit results
+        summary = []
+        for ur in unit_results:
+            summary.append({
+                "unit_id": ur.get("unit_id"),
+                "status": ur.get("status"),
+                "charts": ur.get("charts", []),
+                "insights": ur.get("insights", []),
+                "statistics": ur.get("statistics", {}),
+                "error": ur.get("error"),
+                "retry_count": ur.get("retry_count"),
+            })
+        artifacts.append(
+            ("analysis_results.json", _json.dumps(summary, ensure_ascii=False, indent=2))
+        )
+        # Per-unit scripts and stdout
+        for ur in unit_results:
+            uid = ur.get("unit_id", "unknown")
+            scripts = ur.get("scripts", [])
+            for i, sp in enumerate(scripts):
+                if os.path.exists(sp):
+                    try:
+                        with open(sp, encoding="utf-8") as src_f:
+                            artifacts.append((f"unit_{uid}_script_{i + 1}.py", src_f.read()))
+                    except OSError:
+                        pass
+            stdout = ur.get("stdout", "")
+            if stdout:
+                artifacts.append((f"unit_{uid}_stdout.txt", stdout))
 
-    exec_result = state.analysis_result or {}
-    if exec_result:
-        if "parsed_output" in exec_result:
+    # Legacy analysis_result shape (backward compat during transition)
+    if not unit_results and an_result:
+        if "parsed_output" in an_result:
             artifacts.append(
                 (
                     "execution_result.json",
-                    _json.dumps(exec_result["parsed_output"], ensure_ascii=False, indent=2),
+                    _json.dumps(an_result["parsed_output"], ensure_ascii=False, indent=2),
                 )
             )
-        for i, attempt in enumerate(exec_result.get("attempts", [])):
+        for i, attempt in enumerate(an_result.get("attempts", [])):
             code = attempt.get("code", "")
             err = attempt.get("error", "")
             content = f"# Attempt {i + 1}\n# Error: {err}\n\n{code}" if code else err
             artifacts.append((f"script_attempt_{i + 1}.py", content))
-        if "script_path" in exec_result:
-            script_path = exec_result["script_path"]
+        if "script_path" in an_result:
+            script_path = an_result["script_path"]
             if os.path.exists(script_path):
                 try:
                     with open(script_path, encoding="utf-8") as src_f:
                         artifacts.append(("final_script.py", src_f.read()))
                 except OSError:
                     pass
-        if "stdout" in exec_result:
-            artifacts.append(("execution_stdout.txt", exec_result["stdout"]))
+        if "stdout" in an_result:
+            artifacts.append(("execution_stdout.txt", an_result["stdout"]))
 
     if state.error:
         artifacts.append(("error.txt", state.error))
 
-    # Copy chart images from sandbox output_dir to intermediates
-    charts_src_dir = exec_result.get("output_dir", "")
-    if charts_src_dir and os.path.isdir(charts_src_dir):
-        import shutil as _shutil
+    # Copy chart images from per-unit output dirs to intermediates
+    import shutil as _shutil
 
-        charts_dst_dir = os.path.join(output_dir, "charts")
-        os.makedirs(charts_dst_dir, exist_ok=True)
-        chart_count = 0
-        for fname in sorted(os.listdir(charts_src_dir)):
-            if fname.lower().endswith(".png"):
-                src = os.path.join(charts_src_dir, fname)
-                dst = os.path.join(charts_dst_dir, fname)
-                try:
-                    _shutil.copy2(src, dst)
-                    chart_count += 1
-                except OSError:
-                    pass
-        if chart_count:
-            print(f"  Charts saved to: {charts_dst_dir}/ ({chart_count} image(s))")
+    charts_dst_dir = os.path.join(output_dir, "charts")
+    chart_count = 0
+    if unit_results:
+        for ur in unit_results:
+            src_dir = ur.get("output_dir", "")
+            if src_dir and os.path.isdir(src_dir):
+                for fname in sorted(os.listdir(src_dir)):
+                    if fname.lower().endswith(".png"):
+                        src = os.path.join(src_dir, fname)
+                        dst = os.path.join(charts_dst_dir, f"unit_{ur.get('unit_id')}_{fname}")
+                        os.makedirs(charts_dst_dir, exist_ok=True)
+                        try:
+                            _shutil.copy2(src, dst)
+                            chart_count += 1
+                        except OSError:
+                            pass
+    else:
+        # Legacy: single output_dir
+        charts_src_dir = an_result.get("output_dir", "")
+        if charts_src_dir and os.path.isdir(charts_src_dir):
+            os.makedirs(charts_dst_dir, exist_ok=True)
+            for fname in sorted(os.listdir(charts_src_dir)):
+                if fname.lower().endswith(".png"):
+                    src = os.path.join(charts_src_dir, fname)
+                    dst = os.path.join(charts_dst_dir, fname)
+                    try:
+                        _shutil.copy2(src, dst)
+                        chart_count += 1
+                    except OSError:
+                        pass
+    if chart_count:
+        print(f"  Charts saved to: {charts_dst_dir}/ ({chart_count} image(s))")
 
     for filename, content in artifacts:
         filepath = os.path.join(output_dir, filename)
@@ -247,7 +299,7 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
 _STAGE_LABELS: dict[str, str] = {
     "data_track": "Stage 1a — Data Profile",
     "business_track": "Stage 1b — Business Analysis",
-    "decision_match": "Stage 2  — Data-Business Alignment",
+    "planner": "Stage 2  — Plan Generation",
     "preprocessing": "Stage 3a — Data Cleaning",
     "analysis": "Stage 3b — Analysis Execution",
     "report_gen": "Stage 4  — Report Assembly",
@@ -255,13 +307,24 @@ _STAGE_LABELS: dict[str, str] = {
 
 
 def _run_graph(
-    state: AgentState, graph: CompiledStateGraph[AgentState, Any, AgentState, AgentState]
+    state: AgentState,
+    graph: CompiledStateGraph[AgentState, Any, AgentState, AgentState],
+    config: dict[str, Any] | None = None,
 ) -> AgentState:
-    """Run the graph with streaming progress display."""
+    """Run the graph with streaming progress display.
+
+    When ``config`` includes ``interrupt_before``, the graph pauses before
+    the specified nodes — the caller is responsible for resuming from the
+    returned state.
+    """
     seen: set[str] = set()
     state_out = state.model_dump()
 
-    for chunk in graph.stream(state, stream_mode="updates"):
+    stream_kwargs: dict[str, Any] = {"stream_mode": "updates"}
+    if config:
+        stream_kwargs["config"] = config
+
+    for chunk in graph.stream(state, **stream_kwargs):
         for node_name in chunk:
             if node_name in _STAGE_LABELS:
                 is_retry = node_name in seen
@@ -273,6 +336,157 @@ def _run_graph(
                 state_out = {**state_out, **chunk[node_name]}
 
     return AgentState(**state_out)
+
+
+def _display_plan(plan: object) -> None:
+    """Display the Plan as a formatted table for user review."""
+    from src.agent.state import Plan
+
+    if not isinstance(plan, Plan):
+        print("  [WARNING] No structured Plan available.")
+        return
+
+    print()
+    print("=" * 72)
+    print("  ANALYSIS PLAN — Review before execution")
+    print("=" * 72)
+
+    # Cleaning unit
+    c = plan.cleaning
+    print("\n  [Cleaning] (unit 0)")
+    print(f"    Purpose : {c.purpose}")
+    print(f"    Cautious: {c.cautious}")
+
+    # Analysis units
+    print(f"\n  [{len(plan.units)} Analysis Unit(s)]")
+    for u in plan.units:
+        model_str = u.model or "(auto)"
+        print(f"    [{u.unit_id}] {u.purpose}")
+        print(f"         Model   : {model_str}")
+        print(f"         Cautious: {u.cautious}")
+
+    # Alignment notes
+    print("\n  Alignment Notes:")
+    print(f"    {plan.alignment_notes}")
+    print()
+    print("-" * 72)
+    print("  Commands: Enter = accept and run | add <purpose> | remove <id>")
+    print("            modify <id> purpose|model|cautious <new value>")
+    print("-" * 72)
+
+
+def _handle_plan_modification(state: AgentState, command: str) -> AgentState:
+    """Parse a user modification command and update the Plan in state.
+
+    Returns updated state. On unrecognized input, prints an error and
+    returns the original state unchanged.
+    """
+    from src.agent.state import PlanUnit
+
+    plan = state.plan
+    if plan is None:
+        print("  [ERROR] No Plan to modify.")
+        return state
+
+    parts = command.strip().split(maxsplit=2)
+    action = parts[0].lower() if parts else ""
+
+    if action == "add" and len(parts) >= 2:
+        purpose = parts[1]
+        model = parts[2] if len(parts) > 2 else None
+        new_id = max([u.unit_id for u in plan.units], default=0) + 1
+        new_unit = PlanUnit(
+            unit_id=new_id,
+            purpose=purpose,
+            model=model,
+            cautious="用户手动添加",
+        )
+        plan.units.append(new_unit)
+        print(f"  [OK] Added unit [{new_id}]: {purpose}")
+        return state.model_copy(update={"plan": plan})
+
+    if action == "remove" and len(parts) >= 2:
+        try:
+            target_id = int(parts[1])
+        except ValueError:
+            print(f"  [ERROR] Invalid unit id: {parts[1]}")
+            return state
+        before = len(plan.units)
+        plan.units = [u for u in plan.units if u.unit_id != target_id]
+        if len(plan.units) < before:
+            print(f"  [OK] Removed unit [{target_id}].")
+        else:
+            print(f"  [ERROR] Unit [{target_id}] not found.")
+        return state.model_copy(update={"plan": plan})
+
+    if action == "modify" and len(parts) >= 3:
+        try:
+            target_id = int(parts[1])
+        except ValueError:
+            print(f"  [ERROR] Invalid unit id: {parts[1]}")
+            return state
+        field = parts[2].lower()
+        # Value is everything after the field name, or empty
+        value_start = len(parts[0]) + len(parts[1]) + len(parts[2]) + 3
+        new_value = command[value_start:].strip() if len(command) > value_start else ""
+
+        for u in plan.units:
+            if u.unit_id == target_id:
+                if field == "purpose":
+                    u.purpose = new_value
+                elif field == "model":
+                    u.model = new_value if new_value else None
+                elif field == "cautious":
+                    u.cautious = new_value
+                else:
+                    print(f"  [ERROR] Unknown field: {field}. Use purpose/model/cautious.")
+                    return state
+                print(f"  [OK] Modified unit [{target_id}] {field}.")
+                return state.model_copy(update={"plan": plan})
+        print(f"  [ERROR] Unit [{target_id}] not found.")
+        return state
+
+    if action:
+        print(f"  [ERROR] Unknown command: {action}. Try add/remove/modify or Enter.")
+    return state
+
+
+def _copy_charts_next_to_report(state: AgentState, output_path: str) -> None:
+    """Copy all chart PNGs from temp dirs to a charts/ dir next to the report.
+
+    Uses unit_{N}_{basename} naming to match what report_gen puts in the
+    markdown image references.
+    """
+    import shutil as _shutil
+
+    an_result = state.analysis_result or {}
+    unit_results = an_result.get("unit_results", [])
+    if not unit_results:
+        return
+
+    report_dir = os.path.dirname(os.path.abspath(output_path))
+    charts_dir = os.path.join(report_dir, "charts")
+    copied = 0
+
+    for ur in unit_results:
+        uid = ur.get("unit_id", "unknown")
+        src_dir = ur.get("output_dir", "")
+        if not src_dir or not os.path.isdir(src_dir):
+            continue
+        for fname in sorted(os.listdir(src_dir)):
+            if fname.lower().endswith(".png"):
+                src = os.path.join(src_dir, fname)
+                clean = _RE_UNIT_PREFIX.sub("", fname)
+                dst = os.path.join(charts_dir, f"unit_{uid}_{clean}")
+                os.makedirs(charts_dir, exist_ok=True)
+                try:
+                    _shutil.copy2(src, dst)
+                    copied += 1
+                except OSError:
+                    pass
+
+    if copied:
+        print(f"  Charts embedded: {charts_dir}/ ({copied} image(s))")
 
 
 def main() -> None:
@@ -299,12 +513,50 @@ def main() -> None:
     print(f"Requirement: {args.requirement}")
     print("Running 4-stage pipeline...\n")
 
-    # First run
+    # ── Phase 1: Plan (data_track → business_track → planner, pause before preprocessing) ──
+    thread_config: dict[str, Any] = {"configurable": {"thread_id": "main"}}
     try:
-        state = _run_graph(state, graph)
+        state = _run_graph(
+            state, graph, config={**thread_config, "interrupt_before": ["preprocessing"]}
+        )
     except Exception as e:
-        print(f"\n[FATAL] Pipeline failed: {e}", file=sys.stderr)
+        print(f"\n[FATAL] Pipeline failed during planning: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # ── Plan Review ──
+    if state.plan and not state.error:
+        _display_plan(state.plan)
+
+        while True:
+            try:
+                command = input("  > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            if not command:
+                break
+
+            state = _handle_plan_modification(state, command)
+
+        if state.feedback:
+            # Plan was modified — re-run planner_node with accumulated feedback
+            from src.agent.nodes.planner import planner_node
+
+            print("\n  Re-validating plan with modifications...")
+            planner_update = planner_node(state)
+            state = AgentState(**(state.model_dump() | planner_update))
+
+    # ── Phase 2: Execute (preprocessing → analysis → report_gen) ──
+    if state.plan and not state.error:
+        print("\n  ── Executing plan ──\n")
+        try:
+            state = _run_graph(state, graph, config=thread_config)
+        except Exception as e:
+            print(f"\n[FATAL] Pipeline failed during execution: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif state.error:
+        print(f"\n[WARNING] Plan generation failed: {state.error}")
 
     report = state.final_report
     if report:
@@ -323,6 +575,9 @@ def main() -> None:
         intermediates_dir = output_path.replace(".md", "_intermediates")
         _save_intermediates(state, intermediates_dir)
 
+    # Always copy charts next to the report so embedded images resolve
+    _copy_charts_next_to_report(state, output_path)
+
     # In-session iteration loop
     while True:
         print()
@@ -340,7 +595,7 @@ def main() -> None:
         state = state.model_copy(update={"feedback": sanitized})
 
         try:
-            state = _run_graph(state, graph)
+            state = _run_graph(state, graph, config=thread_config)
         except Exception as e:
             print(f"\n[FATAL] Iteration failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -348,11 +603,11 @@ def main() -> None:
         report = state.final_report
         if report:
             _print_report(report)
-            output_path = output_path.replace(".md", "_revised.md")
+            revised_path = output_path.replace(".md", "_revised.md")
             try:
-                with open(output_path, "w", encoding="utf-8") as f:
+                with open(revised_path, "w", encoding="utf-8") as f:
                     f.write(report)
-                print(f"\nRevised report saved to: {output_path}")
+                print(f"\nRevised report saved to: {revised_path}")
             except OSError as e:
                 print(f"\n[WARNING] Could not save report: {e}", file=sys.stderr)
         else:

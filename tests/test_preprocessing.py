@@ -7,7 +7,7 @@ import pytest
 from src.agent.nodes.preprocessing import (
     _build_clean_code_prompt,
     _build_clean_react_fix_prompt,
-    _serialize_preprocessing_steps,
+    _serialize_cleaning_unit,
     preprocessing_node,
 )
 from src.agent.state import AgentState
@@ -15,24 +15,18 @@ from src.sandbox.executor import SandboxResult
 
 
 @pytest.mark.unit
-def test_serialize_preprocessing_steps(make_execution_plan: object) -> None:
-    plan = make_execution_plan()
-    text = _serialize_preprocessing_steps(plan)
-    assert "drop_null_rows" in text
-    assert "region" in text
+def test_serialize_cleaning_unit(sample_plan: object) -> None:
+    text = _serialize_cleaning_unit(sample_plan.cleaning)
+    assert "处理缺失值" in text
+    assert "0值" in text
 
 
 @pytest.mark.unit
-def test_serialize_preprocessing_steps_fallback() -> None:
-    assert _serialize_preprocessing_steps("not a plan") == "[]"
-
-
-@pytest.mark.unit
-def test_build_clean_code_prompt_structure(make_execution_plan: object) -> None:
-    prompt = _build_clean_code_prompt(make_execution_plan(), "/tmp/data.csv", "/tmp/out")
+def test_build_clean_code_prompt_structure(sample_plan: object) -> None:
+    prompt = _build_clean_code_prompt(sample_plan.cleaning, "/tmp/data.csv", "/tmp/out")
 
     assert "data cleaning specialist" in prompt.lower()
-    assert "drop_null_rows" in prompt
+    assert "处理缺失值" in prompt
     assert "NO network calls" in prompt
     assert "try/except" in prompt or "try / except" in prompt
     assert "cleaned_shape" in prompt
@@ -42,9 +36,9 @@ def test_build_clean_code_prompt_structure(make_execution_plan: object) -> None:
 
 
 @pytest.mark.unit
-def test_build_clean_react_fix_prompt_includes_error(make_execution_plan: object) -> None:
+def test_build_clean_react_fix_prompt_includes_error(sample_plan: object) -> None:
     prompt = _build_clean_react_fix_prompt(
-        make_execution_plan(),
+        sample_plan.cleaning,
         "df.dropna()\n",
         "KeyError: 'region'",
         "/tmp/data.csv",
@@ -54,12 +48,12 @@ def test_build_clean_react_fix_prompt_includes_error(make_execution_plan: object
     assert "debugging specialist" in prompt.lower()
     assert "KeyError: 'region'" in prompt
     assert "df.dropna()" in prompt
-    assert "drop_null_rows" in prompt
     assert "FIXED" in prompt
+    assert "处理缺失值" in prompt
 
 
 @pytest.mark.unit
-def test_preprocessing_node_missing_execution_plan() -> None:
+def test_preprocessing_node_missing_plan() -> None:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean data",
@@ -68,32 +62,13 @@ def test_preprocessing_node_missing_execution_plan() -> None:
     new_state = preprocessing_node(state)
 
     assert "error" in new_state
-    assert "execution_plan" in new_state["error"]
+    assert "plan" in new_state["error"]
     assert new_state["preprocessing_result"]["retry_count"] == 3
 
 
 @pytest.mark.unit
-def test_preprocessing_node_no_steps_skips(set_llm_env: None, make_execution_plan: object) -> None:
-    _ = set_llm_env
-    plan = make_execution_plan(preprocessing_steps=[])
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Clean data",
-        execution_plan=plan,
-    )
-
-    new_state = preprocessing_node(state)
-
-    assert new_state.get("error") is None
-    result = new_state["preprocessing_result"]
-    assert result["skipped"] is True
-    assert result["cleaned_data_path"] == "/tmp/test.csv"
-    assert result["cleaning_actions"] == []
-
-
-@pytest.mark.unit
 def test_preprocessing_node_success_first_attempt(
-    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+    set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -121,7 +96,7 @@ def test_preprocessing_node_success_first_attempt(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales data",
-        execution_plan=make_execution_plan(),
+        plan=sample_plan,
     )
 
     with (
@@ -141,7 +116,7 @@ def test_preprocessing_node_success_first_attempt(
 
 @pytest.mark.unit
 def test_preprocessing_node_sandbox_error_triggers_retry(
-    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+    set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -160,7 +135,7 @@ def test_preprocessing_node_sandbox_error_triggers_retry(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales",
-        execution_plan=make_execution_plan(),
+        plan=sample_plan,
     )
 
     with (
@@ -179,7 +154,7 @@ def test_preprocessing_node_sandbox_error_triggers_retry(
 
 @pytest.mark.unit
 def test_preprocessing_node_react_retry_then_success(
-    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+    set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -192,11 +167,10 @@ def test_preprocessing_node_react_retry_then_success(
     mock_response.content = "pd.to_numeric(df['col'])\n"
     mock_llm.invoke.return_value = mock_response
 
-    plan = make_execution_plan()
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales",
-        execution_plan=plan,
+        plan=sample_plan,
     )
 
     with (
@@ -211,7 +185,7 @@ def test_preprocessing_node_react_retry_then_success(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales",
-        execution_plan=plan,
+        plan=sample_plan,
         preprocessing_result=state_dict["preprocessing_result"],
     )
 
@@ -244,7 +218,7 @@ def test_preprocessing_node_react_retry_then_success(
 
 @pytest.mark.unit
 def test_preprocessing_node_timeout_handling(
-    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+    set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -263,7 +237,7 @@ def test_preprocessing_node_timeout_handling(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean sales",
-        execution_plan=make_execution_plan(),
+        plan=sample_plan,
     )
 
     with (
@@ -279,7 +253,7 @@ def test_preprocessing_node_timeout_handling(
 
 @pytest.mark.unit
 def test_preprocessing_node_invalid_json_output(
-    set_llm_env: None, temp_output_dir: str, make_execution_plan: object
+    set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
     _ = set_llm_env
 
@@ -298,7 +272,7 @@ def test_preprocessing_node_invalid_json_output(
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean",
-        execution_plan=make_execution_plan(),
+        plan=sample_plan,
     )
 
     with (
@@ -313,7 +287,7 @@ def test_preprocessing_node_invalid_json_output(
 
 
 @pytest.mark.unit
-def test_preprocessing_node_llm_error(set_llm_env: None, make_execution_plan: object) -> None:
+def test_preprocessing_node_llm_error(set_llm_env: None, sample_plan: object) -> None:
     _ = set_llm_env
 
     mock_llm = MagicMock()
@@ -322,7 +296,7 @@ def test_preprocessing_node_llm_error(set_llm_env: None, make_execution_plan: ob
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Clean",
-        execution_plan=make_execution_plan(),
+        plan=sample_plan,
     )
 
     with patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_llm):
@@ -330,3 +304,89 @@ def test_preprocessing_node_llm_error(set_llm_env: None, make_execution_plan: ob
 
     assert "error" in new_state
     assert "API rate limit" in new_state["error"]
+
+
+# --- M4: Timeout Configuration Tests ---
+
+
+@pytest.mark.unit
+def test_preprocessing_node_uses_configured_timeout(
+    set_llm_env: None, temp_output_dir: str, sample_plan: object, monkeypatch: object
+) -> None:
+    _ = set_llm_env
+
+    monkeypatch.setenv("DATAINSIGHT_TIMEOUT_CLEANING", "180")
+    # Force reload of the module-level constant by re-importing the module
+    import importlib
+
+    import src.agent.nodes.preprocessing as pp_mod
+    importlib.reload(pp_mod)
+
+    sandbox_result = SandboxResult(
+        stdout='{"cleaned_shape": {"rows": 98, "cols": 5}, '
+        '"cleaning_actions": ["ok"], '
+        '"cleaned_data_path": "/tmp/out/cleaned_data.csv"}',
+        stderr="",
+        exit_code=0,
+        timed_out=False,
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(content="print('{}')\n")
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Clean",
+        plan=sample_plan,
+    )
+
+    with (
+        patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_llm),
+        patch("src.agent.nodes.preprocessing.run_script", return_value=sandbox_result) as mock_run,
+    ):
+        new_state = pp_mod.preprocessing_node(state)
+
+    assert new_state.get("error") is None
+    assert mock_run.call_args[1]["timeout_seconds"] == 180
+
+
+@pytest.mark.unit
+def test_preprocessing_node_timeout_env_fallback(
+    set_llm_env: None, temp_output_dir: str, sample_plan: object, monkeypatch: object
+) -> None:
+    _ = set_llm_env
+
+    monkeypatch.setenv("DATAINSIGHT_TIMEOUT_CLEANING", "not-a-number")
+    import importlib
+
+    import src.agent.nodes.preprocessing as pp_mod
+    importlib.reload(pp_mod)
+
+    sandbox_result = SandboxResult(
+        stdout='{"cleaned_shape": {"rows": 98, "cols": 5}, '
+        '"cleaning_actions": ["ok"], '
+        '"cleaned_data_path": "/tmp/out/cleaned_data.csv"}',
+        stderr="",
+        exit_code=0,
+        timed_out=False,
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(content="print('{}')\n")
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Clean",
+        plan=sample_plan,
+    )
+
+    with (
+        patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_llm),
+        patch("src.agent.nodes.preprocessing.run_script", return_value=sandbox_result) as mock_run,
+    ):
+        new_state = pp_mod.preprocessing_node(state)
+
+    assert new_state.get("error") is None
+    # Should fall back to DEFAULT_TIMEOUT (120)
+    from src.sandbox.executor import DEFAULT_TIMEOUT
+    assert mock_run.call_args[1]["timeout_seconds"] == DEFAULT_TIMEOUT

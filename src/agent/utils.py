@@ -37,3 +37,20 @@ def _extract_code_block(text: str) -> str:
     if match:
         return match.group(1).strip()
     return text.strip()
+
+
+def _extract_json(text: str) -> str:
+    """Extract JSON object from text — handles markdown fences and multi-line output.
+
+    Tries in order: (1) markdown code fence, (2) outermost braces.
+    Returns the extracted JSON string on success, or the original text on failure.
+    """
+    text = text.strip()
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text

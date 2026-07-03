@@ -7,11 +7,10 @@ import pytest
 
 from src.agent.graph import (
     _should_iterate,
-    _should_retry_analysis,
     _should_retry_preprocessing,
     build_graph,
 )
-from src.agent.state import AgentState, AnalysisIntent, ExecutionPlan
+from src.agent.state import AgentState, AnalysisIntent
 
 _INTENT_JSON = json.dumps(
     {
@@ -21,6 +20,28 @@ _INTENT_JSON = json.dumps(
         "dimensions": ["time period"],
         "comparison_baseline": None,
     }
+)
+
+_PLAN_JSON = json.dumps(
+    {
+        "cleaning": {
+            "purpose": "处理缺失值",
+            "model": None,
+            "cautious": "0值可能是实际数据",
+            "depends_on": [],
+        },
+        "units": [
+            {
+                "unit_id": 1,
+                "purpose": "按区域分析销售趋势",
+                "model": "线性回归",
+                "cautious": "region列有2%缺失值",
+                "depends_on": [],
+            }
+        ],
+        "alignment_notes": "基于当前数据，本报告能够部分回答用户问题。",
+    },
+    ensure_ascii=False,
 )
 
 
@@ -37,7 +58,7 @@ def test_graph_node_names() -> None:
 
     assert "data_track" in node_names
     assert "business_track" in node_names
-    assert "decision_match" in node_names
+    assert "planner" in node_names
     assert "preprocessing" in node_names
     assert "analysis" in node_names
     assert "report_gen" in node_names
@@ -45,8 +66,7 @@ def test_graph_node_names() -> None:
 
 @pytest.mark.integration
 def test_graph_data_track_integration(
-    sample_csv_path: str, set_llm_env: None, make_execution_plan: object
-) -> None:
+    sample_csv_path: str, set_llm_env: None) -> None:
     """Invoke the graph with parallel data_track + business_track and mocked downstream nodes."""
     _ = set_llm_env
 
@@ -58,7 +78,7 @@ def test_graph_data_track_integration(
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(
-        content=make_execution_plan(preprocessing_steps=[]).model_dump_json()
+        content=_PLAN_JSON
     )
 
     mock_pre = MagicMock()
@@ -99,7 +119,7 @@ def test_graph_data_track_integration(
     with (
         patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
-        patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
+        patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
@@ -117,14 +137,13 @@ def test_graph_data_track_integration(
 
 @pytest.mark.integration
 def test_graph_m2_full_pipeline(
-    sample_csv_path: str, set_llm_env: None, make_execution_plan: object
-) -> None:
-    """Full M1+M2 pipeline: data_track → business_track → decision_match."""
+    sample_csv_path: str, set_llm_env: None) -> None:
+    """Full M1+M2 pipeline: data_track → business_track → planner."""
     _ = set_llm_env
 
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
-    from src.agent.nodes.decision_match import decision_match_node
+    from src.agent.nodes.planner import planner_node
 
     mock_dt = MagicMock()
     mock_dt_response = MagicMock()
@@ -138,7 +157,7 @@ def test_graph_m2_full_pipeline(
 
     mock_dm = MagicMock()
     mock_dm_response = MagicMock()
-    mock_dm_response.content = make_execution_plan(preprocessing_steps=[]).model_dump_json()
+    mock_dm_response.content = _PLAN_JSON
     mock_dm.invoke.return_value = mock_dm_response
 
     state = AgentState(
@@ -149,13 +168,13 @@ def test_graph_m2_full_pipeline(
     with (
         patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
-        patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
+        patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
     ):
         dt_update = data_track_node(state)
         state = AgentState(**(state.model_dump() | dt_update))
         bt_update = business_track_node(state)
         state = AgentState(**(state.model_dump() | bt_update))
-        dm_update = decision_match_node(state)
+        dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
 
     mock_dt.invoke.assert_called_once()
@@ -165,28 +184,26 @@ def test_graph_m2_full_pipeline(
     assert state.data_profile is not None
     assert state.cleaning_insights is not None
     assert state.analysis_intent is not None
-    assert state.execution_plan is not None
+    assert state.plan is not None
     assert "数据清洗建议" in (state.cleaning_insights or "")
     assert isinstance(state.analysis_intent, AnalysisIntent)
     assert state.analysis_intent.analysis_type == "diagnostic"
-    assert isinstance(state.execution_plan, ExecutionPlan)
-    assert len(state.execution_plan.feasibility_map) == 1
-    assert "部分回答用户问题" in state.execution_plan.alignment_notes
+    assert len(state.plan.units) == 1
+    assert "部分回答用户问题" in state.plan.alignment_notes
     assert state.error is None
 
 
 @pytest.mark.integration
 def test_graph_m3_execution_integration(
-    sample_csv_path: str, set_llm_env: None, temp_output_dir: str, make_execution_plan: object
-) -> None:
-    """Full M1+M2+M3a+M3b pipeline: data_track, business_track, decision_match,
+    sample_csv_path: str, set_llm_env: None, temp_output_dir: str) -> None:
+    """Full M1+M2+M3a+M3b pipeline: data_track, business_track, planner,
     preprocessing, analysis with mocked LLMs and sandbox."""
     _ = set_llm_env
 
     from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
-    from src.agent.nodes.decision_match import decision_match_node
+    from src.agent.nodes.planner import planner_node
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.sandbox.executor import SandboxResult
 
@@ -198,7 +215,7 @@ def test_graph_m3_execution_integration(
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(
-        content=make_execution_plan(preprocessing_steps=[]).model_dump_json()
+        content=_PLAN_JSON
     )
 
     mock_pre = MagicMock()
@@ -235,7 +252,7 @@ def test_graph_m3_execution_integration(
     with (
         patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
-        patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
+        patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
@@ -245,7 +262,7 @@ def test_graph_m3_execution_integration(
         state = AgentState(**(state.model_dump() | dt_update))
         bt_update = business_track_node(state)
         state = AgentState(**(state.model_dump() | bt_update))
-        dm_update = decision_match_node(state)
+        dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
         pre_update = preprocessing_node(state)
         state = AgentState(**(state.model_dump() | pre_update))
@@ -254,18 +271,17 @@ def test_graph_m3_execution_integration(
 
     assert state.data_profile is not None
     assert state.analysis_intent is not None
-    assert state.execution_plan is not None
-    assert isinstance(state.execution_plan, ExecutionPlan)
+    assert state.plan is not None
     assert state.preprocessing_result is not None
-    assert state.preprocessing_result["skipped"] is True
-    assert state.preprocessing_result["cleaned_data_path"] == sample_csv_path
+    assert state.preprocessing_result["retry_count"] == 0
     assert state.analysis_result is not None
     assert state.error is None
 
     result = state.analysis_result
-    assert "parsed_output" in result
-    assert result["parsed_output"]["insights"] == ["Sales rose in Q3"]
-    assert result["retry_count"] == 0
+    assert "unit_results" in result
+    assert len(result["unit_results"]) == 1
+    assert result["unit_results"][0]["status"] == "success"
+    assert result["unit_results"][0]["insights"] == ["Sales rose in Q3"]
 
     mock_dt.invoke.assert_called_once()
     mock_bt.invoke.assert_called_once()
@@ -300,48 +316,20 @@ def test_graph_conditional_edges_preprocessing() -> None:
     assert _should_retry_preprocessing(state_give_up) == "report_gen"
 
 
-@pytest.mark.unit
-def test_graph_conditional_edges_analysis() -> None:
-    """Verify the analysis ReAct retry routing logic."""
-
-    # No error — go to report_gen
-    state_no_error = AgentState(file_path="", user_requirement="")
-    assert _should_retry_analysis(state_no_error) == "report_gen"
-
-    # Error + retry_count < 3 — retry analysis
-    state_with_error = AgentState(
-        file_path="",
-        user_requirement="",
-        error="something failed",
-        analysis_result={"retry_count": 1},
-    )
-    assert _should_retry_analysis(state_with_error) == "analysis"
-
-    # Error + retry_count >= 3 — give up, go to report_gen
-    state_max_retries = AgentState(
-        file_path="",
-        user_requirement="",
-        error="failed again",
-        analysis_result={"retry_count": 3},
-    )
-    assert _should_retry_analysis(state_max_retries) == "report_gen"
-
-
 @pytest.mark.integration
 def test_graph_m4_full_pipeline(
     sample_csv_path: str,
     set_llm_env: None,
     sample_analysis_result: dict,
-    make_execution_plan: object,
 ) -> None:
-    """Full 6-node pipeline: data_track → business_track → decision_match →
+    """Full 6-node pipeline: data_track → business_track → planner →
     preprocessing → analysis → report_gen."""
     _ = set_llm_env
 
     from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
-    from src.agent.nodes.decision_match import decision_match_node
+    from src.agent.nodes.planner import planner_node
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.agent.nodes.report_gen import report_gen_node
     from src.sandbox.executor import SandboxResult
@@ -354,7 +342,7 @@ def test_graph_m4_full_pipeline(
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(
-        content=make_execution_plan(preprocessing_steps=[]).model_dump_json()
+        content=_PLAN_JSON
     )
 
     mock_pre = MagicMock()
@@ -393,7 +381,7 @@ def test_graph_m4_full_pipeline(
     with (
         patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
-        patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
+        patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
@@ -404,7 +392,7 @@ def test_graph_m4_full_pipeline(
         state = AgentState(**(state.model_dump() | dt_update))
         bt_update = business_track_node(state)
         state = AgentState(**(state.model_dump() | bt_update))
-        dm_update = decision_match_node(state)
+        dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
         pre_update = preprocessing_node(state)
         state = AgentState(**(state.model_dump() | pre_update))
@@ -427,14 +415,13 @@ def test_graph_feedback_iteration(
     sample_analysis_result: dict,
     sample_data_profile: object,
     sample_analysis_intent: object,
-    make_execution_plan: object,
 ) -> None:
-    """Feedback loop: user feedback → decision_match revises → preprocessing →
+    """Feedback loop: user feedback → planner revises → preprocessing →
     analysis → report_gen regenerates."""
     _ = set_llm_env
 
     from src.agent.nodes.analysis import analysis_node
-    from src.agent.nodes.decision_match import decision_match_node
+    from src.agent.nodes.planner import planner_node
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.agent.nodes.report_gen import report_gen_node
     from src.sandbox.executor import SandboxResult
@@ -445,36 +432,32 @@ def test_graph_feedback_iteration(
         data_profile=sample_data_profile,
         cleaning_insights="## 数据清洗建议\nClean.",
         analysis_intent=sample_analysis_intent,
-        execution_plan=make_execution_plan(
-            preprocessing_steps=[], analysis_steps=[], model_selections=[]
-        ),
         feedback="The chart on regional sales is wrong, use monthly data instead.",
     )
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(
-        content=make_execution_plan(
-            feasibility_map=[
-                {
-                    "intent_dimension": "monthly",
-                    "matched_columns": ["date"],
-                    "feasibility": "可直接实现",
-                    "confidence": "High",
-                    "reasoning": "Monthly grouping per feedback",
-                }
-            ],
-            model_selections=[
-                {
-                    "analysis_step": "Monthly trend",
-                    "method": "pandas.DataFrame.resample",
-                    "reasoning": "Monthly resample as requested",
-                    "feasibility": "可直接实现",
-                }
-            ],
-            preprocessing_steps=[],
-            analysis_steps=[],
-            alignment_notes="修订版：基于用户反馈改用月度分组。",
-        ).model_dump_json()
+        content=json.dumps(
+            {
+                "cleaning": {
+                    "purpose": "处理缺失值",
+                    "model": None,
+                    "cautious": "0值可能是实际数据",
+                    "depends_on": [],
+                },
+                "units": [
+                    {
+                        "unit_id": 1,
+                        "purpose": "Monthly trend",
+                        "model": "pandas.DataFrame.resample",
+                        "cautious": "日期格式需统一",
+                        "depends_on": [],
+                    }
+                ],
+                "alignment_notes": "修订版：基于用户反馈改用月度分组。",
+            },
+            ensure_ascii=False,
+        )
     )
 
     mock_pre = MagicMock()
@@ -504,14 +487,14 @@ def test_graph_feedback_iteration(
     )
 
     with (
-        patch("src.agent.nodes.decision_match.get_llm", return_value=mock_dm),
+        patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
         patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
-        dm_update = decision_match_node(state)
+        dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
         pre_update = preprocessing_node(state)
         state = AgentState(**(state.model_dump() | pre_update))
@@ -521,9 +504,8 @@ def test_graph_feedback_iteration(
         state = AgentState(**(state.model_dump() | rg_update))
 
     assert state.feedback is None
-    assert state.execution_plan is not None
-    assert isinstance(state.execution_plan, ExecutionPlan)
-    assert "修订版" in state.execution_plan.alignment_notes
+    assert state.plan is not None
+    assert "修订版" in state.plan.alignment_notes
     assert state.final_report is not None
     assert state.error is None
 
@@ -543,4 +525,4 @@ def test_graph_should_iterate() -> None:
         user_requirement="",
         feedback="Change the chart type to bar",
     )
-    assert _should_iterate(state_with_feedback) == "decision_match"
+    assert _should_iterate(state_with_feedback) == "planner"

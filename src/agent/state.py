@@ -27,6 +27,19 @@ class DataProfile(BaseModel):
     encoding: str | None = None
 
 
+class Suggestion(BaseModel):
+    """A "perhaps consider" hint for the Planner — not a directive.
+
+    These are recommended analytical angles derived from the business question.
+    The Planner treats them as strong hints but may reject or adapt them based
+    on actual data characteristics.
+    """
+
+    category: str  # "dimension" | "method" | "comparison" | "caution"
+    content: str  # e.g. "按地区细分以发现地理差异"
+    rationale: str  # e.g. "地区差异是销售波动的常见原因"
+
+
 class AnalysisIntent(BaseModel):
     """Structured analytical intent extracted from the user's business question."""
 
@@ -35,15 +48,33 @@ class AnalysisIntent(BaseModel):
     analysis_type: str
     dimensions: list[str]
     comparison_baseline: str | None = None
+    # --- Cycle 2 M3: question intelligence ---
+    expanded_question: str | None = None
+    complexity: str = "moderate"  # "simple" | "moderate" | "complex"
+    suggestions: list[Suggestion] = []
+    caution_notes: str | None = None
 
 
-class ExecutionPlan(BaseModel):
-    """Planner output: concrete analysis plan bridging data reality to business goals."""
+class PlanUnit(BaseModel):
+    """A single unit of work — cleaning or analysis — within a Plan."""
 
-    feasibility_map: list[dict[str, Any]]
-    model_selections: list[dict[str, Any]]
-    preprocessing_steps: list[dict[str, Any]]
-    analysis_steps: list[dict[str, Any]]
+    unit_id: int
+    purpose: str
+    model: str | None = None
+    cautious: str
+    depends_on: list[int] = []
+
+
+class Plan(BaseModel):
+    """Structured analysis orchestration plan (Cycle 2 M1).
+
+    One fixed cleaning unit + N independent analysis units. Each unit specifies
+    its purpose, preferred model, and cautions. Units are star-shaped (no chain
+    dependencies) — depends_on reserved for future use.
+    """
+
+    cleaning: PlanUnit
+    units: list[PlanUnit]
     alignment_notes: str
 
 
@@ -59,7 +90,7 @@ class AgentState(BaseModel):
     data_profile: DataProfile | None = None
     cleaning_insights: str | None = None
     analysis_intent: AnalysisIntent | None = None
-    execution_plan: ExecutionPlan | None = None
+    plan: Plan | None = None
     preprocessing_result: dict[str, Any] | None = None
     analysis_result: dict[str, Any] | None = None
     final_report: str | None = None

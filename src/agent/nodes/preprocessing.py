@@ -6,23 +6,38 @@ import os
 import tempfile
 
 from src.agent.llm import get_llm
-from src.agent.state import AgentState, ExecutionPlan
-from src.agent.utils import _extract_code_block, register_temp_path
-from src.sandbox.executor import SandboxResult, run_script
+from src.agent.state import AgentState, PlanUnit
+from src.agent.utils import _extract_code_block, _extract_json, register_temp_path
+from src.sandbox.executor import DEFAULT_TIMEOUT, SandboxResult, run_script
 from src.sandbox.static_guard import check_static
 
 logger = logging.getLogger(__name__)
 
+_CLEANING_TIMEOUT: int
+try:
+    _CLEANING_TIMEOUT = int(os.environ.get("DATAINSIGHT_TIMEOUT_CLEANING", "180"))
+except ValueError:
+    _CLEANING_TIMEOUT = DEFAULT_TIMEOUT
+    logger.warning(
+        "Invalid DATAINSIGHT_TIMEOUT_CLEANING, falling back to %ds", DEFAULT_TIMEOUT
+    )
 
-def _serialize_preprocessing_steps(execution_plan: object) -> str:
-    """Extract preprocessing_steps from ExecutionPlan as JSON string."""
-    if isinstance(execution_plan, ExecutionPlan):
-        return json.dumps(execution_plan.preprocessing_steps, indent=2, ensure_ascii=False)
-    return "[]"
+
+def _serialize_cleaning_unit(cleaning: PlanUnit) -> str:
+    """Serialize the cleaning PlanUnit as JSON for prompt inclusion."""
+    return json.dumps(
+        {
+            "unit_id": cleaning.unit_id,
+            "purpose": cleaning.purpose,
+            "cautious": cleaning.cautious,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
-def _build_clean_code_prompt(execution_plan: object, file_path: str, output_dir: str) -> str:
-    steps_text = _serialize_preprocessing_steps(execution_plan)
+def _build_clean_code_prompt(cleaning: PlanUnit, file_path: str, output_dir: str) -> str:
+    steps_text = _serialize_cleaning_unit(cleaning)
     return f"""You are a data cleaning specialist. Write a COMPLETE, runnable Python script
 that executes the data cleaning steps listed below.
 
@@ -52,7 +67,7 @@ CRITICAL RULES:
 
 ---
 
-**DATA CLEANING STEPS (JSON):**
+**DATA CLEANING UNIT (JSON):**
 
 {steps_text}
 
@@ -64,13 +79,13 @@ CRITICAL RULES:
 
 
 def _build_clean_react_fix_prompt(
-    execution_plan: object,
+    cleaning: PlanUnit,
     previous_code: str,
     error_message: str,
     file_path: str,
     output_dir: str,
 ) -> str:
-    steps_text = _serialize_preprocessing_steps(execution_plan)
+    steps_text = _serialize_cleaning_unit(cleaning)
     return f"""You are a debugging specialist. The Python cleaning script below FAILED.
 Diagnose the root cause and produce a FIXED, complete Python script.
 
@@ -83,9 +98,9 @@ FAILURE ANALYSIS:
    - **Wrong column names**: check the cleaning steps for actual column names.
    - **Type mismatches / NaN**: add pd.to_numeric(), fillna(), or dropna().
    - **Path / encoding issues**: verify the file exists and encoding is correct.
-   - **Timeout (120s)**: the script was too slow. Replace ALL .iterrows() or nested
-     Python for loops with vectorized pandas. For large datasets, sample down to
-     30K rows first.
+   - **Timeout ({_CLEANING_TIMEOUT}s)**: the script was too slow. Replace ALL
+     .iterrows() or nested Python for loops with vectorized pandas. For large
+     datasets, sample down to 30K rows first.
 3. Fix ONLY what's broken — do not rewrite the entire cleaning logic.
 
 Same rules as before:
@@ -96,7 +111,7 @@ Same rules as before:
 
 ---
 
-**CLEANING STEPS (JSON):**
+**CLEANING UNIT (JSON):**
 
 {steps_text}
 
@@ -127,32 +142,20 @@ def preprocessing_node(state: AgentState) -> dict[str, object]:
     """Stage 3a — Preprocessing: generate data cleaning code, run in sandbox,
     ReAct retry on error.
 
-    Reads: state.execution_plan.preprocessing_steps, state.file_path
+    Reads: state.plan.cleaning, state.file_path
     Writes: state.preprocessing_result, state.error
     """
-    execution_plan = state.execution_plan
+    plan = state.plan
     file_path = state.file_path
 
-    if not execution_plan:
-        logger.error("Preprocessing: execution_plan is missing from state")
+    if not plan:
+        logger.error("Preprocessing: no Plan available")
         return {
-            "error": "Preprocessing: execution_plan not available (Decision Match may have failed)",
+            "error": "Preprocessing: plan not available (Planner may have failed)",
             "preprocessing_result": {"retry_count": 3, "attempts": []},
         }
 
-    if not execution_plan.preprocessing_steps:
-        logger.info("Preprocessing: no preprocessing steps — skipping")
-        return {
-            "preprocessing_result": {
-                "retry_count": 0,
-                "attempts": [],
-                "skipped": True,
-                "cleaned_data_path": file_path,
-                "cleaned_shape": None,
-                "cleaning_actions": [],
-            },
-            "error": None,
-        }
+    cleaning = plan.cleaning
 
     pre_result = state.preprocessing_result or {}
     retry_count = pre_result.get("retry_count", 0)
@@ -166,11 +169,11 @@ def preprocessing_node(state: AgentState) -> dict[str, object]:
     if retry_count > 0 and attempts:
         last = attempts[-1]
         prompt = _build_clean_react_fix_prompt(
-            execution_plan, last["code"], last["error"], file_path, output_dir
+            cleaning, last["code"], last["error"], file_path, output_dir
         )
         logger.info("Preprocessing: ReAct retry %d/3", retry_count)
     else:
-        prompt = _build_clean_code_prompt(execution_plan, file_path, output_dir)
+        prompt = _build_clean_code_prompt(cleaning, file_path, output_dir)
         logger.info("Preprocessing: generating cleaning script (fresh)")
 
     # LLM generates code
@@ -181,6 +184,7 @@ def preprocessing_node(state: AgentState) -> dict[str, object]:
         code = str(raw) if not isinstance(raw, str) else raw
     except Exception as e:
         logger.error("Preprocessing: LLM call failed: %s", e)
+        attempts.append({"code": "", "error": f"LLM error: {e}"})
         return {
             "error": f"Preprocessing LLM error: {e}",
             "preprocessing_result": {
@@ -211,11 +215,14 @@ def preprocessing_node(state: AgentState) -> dict[str, object]:
         f.write(code)
     logger.info("Preprocessing: script written to %s (%d bytes)", script_path, len(code))
 
-    result: SandboxResult = run_script(script_path, [file_path, output_dir])
+    result: SandboxResult = run_script(
+        script_path, [file_path, output_dir], timeout_seconds=_CLEANING_TIMEOUT
+    )
 
     if result.exit_code == 0:
         try:
-            parsed = json.loads(result.stdout.strip().splitlines()[-1])
+            json_text = _extract_json(result.stdout)
+            parsed = json.loads(json_text)
         except (json.JSONDecodeError, IndexError):
             error_msg = (
                 f"Cleaning script exited 0 but produced invalid JSON. "
@@ -251,7 +258,7 @@ def preprocessing_node(state: AgentState) -> dict[str, object]:
         or f"Exit code {result.exit_code}"
     )
     if result.timed_out:
-        error_msg = f"[TIMEOUT after 120s]\n{error_msg}"
+        error_msg = f"[TIMEOUT after {_CLEANING_TIMEOUT}s]\n{error_msg}"
 
     logger.error("Preprocessing: FAILED (attempt %d/3): %s", retry_count + 1, error_msg[:200])
     attempts.append({"code": code, "error": error_msg})

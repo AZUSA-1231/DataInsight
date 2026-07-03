@@ -1,9 +1,9 @@
 # DataInsight — Progressive Data Analysis AI Agent
 
 DataInsight is an LLM-driven data analysis agent that enforces a mandatory
-**4-stage LangGraph state machine** before producing any report. It never
-"blindly executes" — every analysis walks through inspect → reason → align →
-execute.
+**6-stage LangGraph state machine** before producing any report. It never
+"blindly executes" — every analysis walks through inspect → reason → plan →
+clean → analyze → report.
 
 ## Philosophy
 
@@ -17,15 +17,16 @@ answer as honestly as what it can.
 ```
 START
   │
-  ├─ Stage 1a: Data Track        ← deterministic script inspects CSV/Excel
-  ├─ Stage 1b: Business Track    ← LLM derives ideal metrics from the question
-  ├─ Stage 2:  Decision Match    ← LLM aligns business ideals with data reality
-  ├─ Stage 3:  Execution         ← LLM generates Python → sandbox → ReAct retry
-  └─ Stage 4:  Report Gen        ← LLM assembles full/partial Markdown report
+  ├─ Stage 1a: Data Track        ← deterministic inspection + LLM cleaning audit
+  ├─ Stage 1b: Business Track    ← LLM derives structured AnalysisIntent
+  ├─ Stage 2:  Planner           ← LLM aligns business intent with data reality
+  ├─ Stage 3:  Preprocessing     ← LLM code gen → sandbox clean → ReAct retry
+  ├─ Stage 4:  Analysis          ← N parallel units, each with ReAct retry (max 3)
+  └─ Stage 5:  Report Gen        ← LLM assembles full/partial Markdown report
   │
   END
   │
-  └─ Feedback loop: user feedback → Stage 2 (skip 1a/1b) → Stage 3 → Stage 4
+  └─ Feedback loop: user feedback → Planner → Preprocessing → Analysis → Report
 ```
 
 Every report includes a mandatory **Data & Business Alignment Notes** chapter
@@ -42,15 +43,20 @@ pip install -e ".[dev]"
 
 ### 2. Configure LLM
 
-Set these environment variables (OpenAI-compatible API):
+Copy `.env.example` to `.env` and fill in your credentials:
 
 ```bash
-export DATAINSIGHT_LLM_MODEL="gpt-4o"
-export DATAINSIGHT_LLM_API_KEY="sk-your-key-here"
+DATAINSIGHT_LLM_MODEL=deepseek-v4-flash
+DATAINSIGHT_LLM_API_KEY=sk-your-key-here
+DATAINSIGHT_LLM_BASE_URL=https://api.deepseek.com/v1
+DATAINSIGHT_LLM_TEMPERATURE=0
+```
 
-# Optional: use a different provider
-export DATAINSIGHT_LLM_BASE_URL="https://api.deepseek.com/v1"
-export DATAINSIGHT_LLM_TEMPERATURE="0"
+Per-node model overrides (optional):
+
+```bash
+DATAINSIGHT_LLM_MODEL_PLANNER=deepseek-v4-pro   # planner gets a stronger model
+DATAINSIGHT_LLM_MODEL_ANALYSIS=deepseek-v4-flash
 ```
 
 ### 3. Run
@@ -59,14 +65,15 @@ export DATAINSIGHT_LLM_TEMPERATURE="0"
 python -m src sales.csv "Why did Q2 sales drop by 15%?"
 ```
 
-The agent will:
-1. **Inspect** the data (deterministic — no LLM hallucination)
-2. **Analyze** your business question
-3. **Align** what the data can do with what you want
-4. **Execute** cleaning + EDA + charts in a sandbox
-5. **Report** with a Markdown file and mandatory alignment notes
+Options:
 
-Output: `sales_analysis_report.md`
+| Flag | Description |
+|------|-------------|
+| `-o`, `--output` | Output Markdown path (default: `<input>_analysis_report.md`) |
+| `-s`, `--save-intermediates` | Save all intermediate artifacts + chart images |
+| `-v`, `--verbose` | Debug logging |
+
+Output: `sales_analysis_report.md` with charts embedded inline.
 
 ### 4. Iterate
 
@@ -76,8 +83,8 @@ After seeing the report, type feedback:
 Feedback (Enter to exit): The chart should use monthly data, not quarterly.
 ```
 
-The agent re-plans from Stage 2 (reusing Stage 1 results) and generates a
-revised report: `sales_analysis_report_revised.md`
+The agent re-plans from the Planner stage (reusing Data/Business Track results)
+and generates a revised report.
 
 ## Supported File Formats
 
@@ -87,19 +94,19 @@ revised report: `sales_analysis_report_revised.md`
 ## Commands
 
 ```bash
-# Run all tests (52 tests)
+# Run all tests (114 tests)
 pytest -v
 
 # Run specific test file
-pytest -v tests/test_execution.py
+pytest -v tests/test_analysis.py
 
 # Run tests by marker
 pytest -v -m unit
 pytest -v -m integration
 
-# Lint & type check
+# Lint & format & type check
 ruff check .
-ruff format --check .
+ruff format .
 mypy src/
 ```
 
@@ -107,35 +114,30 @@ mypy src/
 
 ```
 src/
-├── __main__.py              ← CLI entry point
+├── __main__.py              ← CLI entry point (argparse, feedback loop)
 ├── agent/
-│   ├── state.py             ← Shared AgentState (TypedDict)
-│   ├── graph.py             ← LangGraph state machine
-│   ├── llm.py               ← LLM factory (env-var driven)
+│   ├── state.py             ← AgentState (Pydantic BaseModel, immutable)
+│   ├── graph.py             ← LangGraph StateGraph (6 nodes + conditional edges)
+│   ├── llm.py               ← LLM factory (env-var driven, per-node model override)
 │   └── nodes/
 │       ├── data_track.py    ← Stage 1a: deterministic inspection + LLM audit
-│       ├── business_track.py← Stage 1b: pure business reasoning
-│       ├── decision_match.py← Stage 2:  data-business alignment
-│       ├── execution.py     ← Stage 3:  code gen + sandbox + ReAct retry
-│       └── report_gen.py    ← Stage 4:  Markdown report assembly
+│       ├── business_track.py← Stage 1b: pure business reasoning → AnalysisIntent
+│       ├── planner.py       ← Stage 2:  data-business alignment → ExecutionPlan
+│       ├── preprocessing.py ← Stage 3:  code gen + sandbox clean + ReAct retry
+│       ├── analysis.py      ← Stage 4:  N parallel units, each ReAct retry (max 3)
+│       └── report_gen.py    ← Stage 5:  Markdown report with embedded charts
 ├── sandbox/
-│   ├── inspection_script.py ← Trusted deterministic script
-│   └── executor.py          ← subprocess sandbox (120s timeout)
-tests/                       ← 52 tests mirroring src/
+│   ├── inspection_script.py ← Trusted deterministic script (never LLM-generated)
+│   ├── static_guard.py      ← Static code safety checker (banned imports/patterns)
+│   └── executor.py          ← subprocess.run sandbox (configurable timeout)
+tests/                       ← 114 tests mirroring src/
 ```
-
-## Design Decisions
-
-See [.claude/decisions.md](.claude/decisions.md) for 15 architecture decision
-records covering: TypedDict vs Pydantic, subprocess sandbox vs Docker,
-sequential dual-track simplification, LLM code generation risk acceptance,
-feedback loop design, and more.
 
 ## Requirements
 
 - Python 3.12+
-- LLM API key (OpenAI or compatible)
+- LLM API key (OpenAI-compatible)
 
 ## License
 
-TBD
+MIT

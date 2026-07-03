@@ -15,7 +15,9 @@ def _load_dotenv() -> None:
     load_dotenv(override=False)
 
 
-def get_llm(temperature: float | None = None) -> BaseChatModel:
+def get_llm(
+    temperature: float | None = None, node: str | None = None
+) -> BaseChatModel:
     """Return a configured LangChain chat model from .env or environment variables.
 
     Load order: .env file first, then os.environ overrides.
@@ -28,13 +30,30 @@ def get_llm(temperature: float | None = None) -> BaseChatModel:
     Optional:
         DATAINSIGHT_LLM_PROVIDER  — "openai" (default)
         DATAINSIGHT_LLM_TEMPERATURE — default 0
+        DATAINSIGHT_LLM_MODEL_<NODE>  — per-node model override (upper-cased)
+        DATAINSIGHT_LLM_API_KEY_<NODE>
+        DATAINSIGHT_LLM_BASE_URL_<NODE>
+
+    When ``node`` is provided (e.g. ``"planner"``), per-node env vars
+    (``DATAINSIGHT_LLM_MODEL_PLANNER``, etc.) take precedence over the
+    base vars. This allows different pipeline stages to target different
+    models (strong model for planner, cheap model for executor).
     """
     _load_dotenv()
 
     provider = os.environ.get("DATAINSIGHT_LLM_PROVIDER", "openai")
-    model = os.environ.get("DATAINSIGHT_LLM_MODEL")
-    api_key = os.environ.get("DATAINSIGHT_LLM_API_KEY")
-    base_url = os.environ.get("DATAINSIGHT_LLM_BASE_URL")
+
+    suffix = f"_{node.upper()}" if node else ""
+
+    model = os.environ.get(f"DATAINSIGHT_LLM_MODEL{suffix}") or os.environ.get(
+        "DATAINSIGHT_LLM_MODEL"
+    )
+    api_key = os.environ.get(f"DATAINSIGHT_LLM_API_KEY{suffix}") or os.environ.get(
+        "DATAINSIGHT_LLM_API_KEY"
+    )
+    base_url = os.environ.get(f"DATAINSIGHT_LLM_BASE_URL{suffix}") or os.environ.get(
+        "DATAINSIGHT_LLM_BASE_URL"
+    )
     temp = (
         temperature
         if temperature is not None

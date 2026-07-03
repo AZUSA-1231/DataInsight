@@ -13,7 +13,7 @@ from src.agent.state import AgentState
 
 @pytest.mark.integration
 def test_smoke_preprocessing_real_sandbox(
-    set_llm_env: None, make_execution_plan: object, temp_output_dir: str
+    set_llm_env: None, make_plan: object, temp_output_dir: str
 ) -> None:
     """Mock LLM returns fixed code; subprocess executes it for real; JSON is parseable.
 
@@ -43,7 +43,7 @@ def test_smoke_preprocessing_real_sandbox(
         state = AgentState(
             file_path=csv_path,
             user_requirement="Smoke test",
-            execution_plan=make_execution_plan(),
+            plan=make_plan(),
         )
 
         with patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_llm):
