@@ -32,3 +32,8 @@ CLAUDE.md
 # Local settings (may contain personal paths)
 .claude/settings.local.json
 *.csv
+
+# Real test generated outputs
+real_test/train_intermediates/
+real_test/charts/
+real_test/train_analysis_report.md

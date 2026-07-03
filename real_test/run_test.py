@@ -120,7 +120,12 @@ if report:
         artifacts.append(("cleaning_insights.md", final_state.cleaning_insights))
 
     # Per-unit results
-    for ur in final_state.analysis_result.get("unit_results", []) if final_state.analysis_result else []:
+    unit_results = (
+        final_state.analysis_result.get("unit_results", [])
+        if final_state.analysis_result
+        else []
+    )
+    for ur in unit_results:
         uid = ur.get("unit_id", "unknown")
         artifacts.append((
             f"unit_{uid}_result.json",

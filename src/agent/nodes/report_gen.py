@@ -106,7 +106,8 @@ Then create ONE subsection per analysis unit from the ANALYSIS RESULTS:
 ### 3.{{N}} {{{{该单元的分析目的（purpose）}}}}
 - **执行状态**: 成功 / 失败
 - **主要发现**: 2-4 key insights from this unit's results
-- **生成图表**: embed EACH chart image using `![description](charts/filename.png)` — use the filenames exactly from the unit's chart list. Then add a one-line note per chart explaining what the reader should see.
+- **生成图表**: embed EACH chart using `![description](charts/filename.png)` with exact
+  filenames from the unit's chart list. Add a one-line note per chart.
 - **关键统计**: notable statistics or metrics
 - **注意事项**: errors, warnings, or caveats if the unit had issues
 
