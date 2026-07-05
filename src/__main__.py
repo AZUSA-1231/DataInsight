@@ -169,8 +169,6 @@ def _save_intermediates(state: AgentState, output_dir: str) -> None:
                 _json.dumps(state.data_profile.model_dump(), ensure_ascii=False, indent=2),
             )
         )
-    if state.cleaning_insights:
-        artifacts.append(("cleaning_insights.md", state.cleaning_insights))
     if state.analysis_intent:
         artifacts.append(
             (
@@ -361,7 +359,9 @@ def _display_plan(plan: object) -> None:
     print(f"\n  [{len(plan.units)} Analysis Unit(s)]")
     for u in plan.units:
         model_str = u.model or "(auto)"
+        fields_str = ", ".join(u.related_fields) if u.related_fields else "(未指定)"
         print(f"    [{u.unit_id}] {u.purpose}")
+        print(f"         Fields  : {fields_str}")
         print(f"         Model   : {model_str}")
         print(f"         Cautious: {u.cautious}")
 

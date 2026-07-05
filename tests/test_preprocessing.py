@@ -19,6 +19,7 @@ def test_serialize_cleaning_unit(sample_plan: object) -> None:
     text = _serialize_cleaning_unit(sample_plan.cleaning)
     assert "处理缺失值" in text
     assert "0值" in text
+    assert "related_fields" in text
 
 
 @pytest.mark.unit

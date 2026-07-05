@@ -4,15 +4,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent.nodes.planner import _build_planner_prompt, _extract_json, planner_node
+from src.agent.nodes.planner import (
+    _build_planner_prompt,
+    _build_planner_review_prompt,
+    _extract_json,
+    planner_node,
+)
 from src.agent.state import AgentState, Plan
 
 _PLAN_JSON = (
     '{"cleaning": {"purpose": "处理缺失值和异常值", "model": null, '
-    '"cautious": "0值可能是实际销售数据而非缺失", "depends_on": []}, '
+    '"cautious": "0值可能是实际销售数据而非缺失", "depends_on": [], '
+    '"related_fields": ["销量"]}, '
     '"units": [{"unit_id": 1, "purpose": "按区域分析销售趋势", '
     '"model": "线性回归", "cautious": "region列有2%缺失值", '
-    '"depends_on": []}], '
+    '"depends_on": [], "related_fields": ["销量", "地区"]}], '
     '"alignment_notes": "基于当前数据，能够部分回答用户问题。"}'
 )
 
@@ -41,8 +47,8 @@ def test_build_planner_prompt_structure(
 ) -> None:
     prompt = _build_planner_prompt(
         sample_data_profile.model_dump_json(indent=2),
-        "清洗建议内容。",
         sample_analysis_intent.model_dump_json(indent=2),
+        unified_columns=["销量", "地区", "日期"],
     )
 
     assert "cleaning" in prompt
@@ -50,7 +56,9 @@ def test_build_planner_prompt_structure(
     assert "alignment_notes" in prompt
     assert "unit_id" in prompt
     assert "MANDATORY" in prompt
-    assert "清洗建议内容" in prompt
+    assert "AVAILABLE COLUMNS" in prompt
+    assert "销量" in prompt
+    assert "related_fields" in prompt
 
 
 @pytest.mark.unit
@@ -59,8 +67,8 @@ def test_build_planner_prompt_mandatory_alignment(
 ) -> None:
     prompt = _build_planner_prompt(
         sample_data_profile.model_dump_json(indent=2),
-        "清洗建议。",
         sample_analysis_intent.model_dump_json(indent=2),
+        unified_columns=["销量", "地区"],
     )
 
     assert "MANDATORY" in prompt or "mandatory" in prompt.lower()
@@ -83,7 +91,7 @@ def test_planner_node_success(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="## 数据清洗建议\n清理缺失值。",
+        unified_columns=["销量", "地区", "日期"],
         analysis_intent=sample_analysis_intent,
     )
 
@@ -99,6 +107,8 @@ def test_planner_node_success(
     assert len(plan.units) == 1
     assert plan.units[0].purpose == "按区域分析销售趋势"
     assert plan.units[0].model == "线性回归"
+    assert plan.units[0].related_fields == ["销量", "地区"]
+    assert plan.cleaning.related_fields == ["销量"]
 
     mock_llm.invoke.assert_called_once()
 
@@ -113,10 +123,10 @@ def test_planner_node_consumes_feedback(
 
     revised_json = (
         '{"cleaning": {"purpose": "处理缺失值", "model": null, '
-        '"cautious": "注意0值", "depends_on": []}, '
+        '"cautious": "注意0值", "depends_on": [], "related_fields": ["销量"]}, '
         '"units": [{"unit_id": 1, "purpose": "月度趋势分析", '
         '"model": "pandas.resample", "cautious": "日期格式需统一", '
-        '"depends_on": []}], '
+        '"depends_on": [], "related_fields": ["日期", "销量"]}], '
         '"alignment_notes": "修订版：基于用户反馈改用月度分组。"}'
     )
 
@@ -129,7 +139,7 @@ def test_planner_node_consumes_feedback(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="清洗建议。",
+        unified_columns=["销量", "地区", "日期"],
         analysis_intent=sample_analysis_intent,
         feedback="Use monthly data instead of daily.",
     )
@@ -160,7 +170,7 @@ def test_planner_node_preserves_state(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="清洗建议。",
+        unified_columns=["销量", "地区", "日期"],
         analysis_intent=sample_analysis_intent,
     )
 
@@ -176,6 +186,7 @@ def test_planner_node_missing_data_profile(sample_analysis_intent: object) -> No
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
+        unified_columns=["销量"],
         analysis_intent=sample_analysis_intent,
     )
 
@@ -187,12 +198,29 @@ def test_planner_node_missing_data_profile(sample_analysis_intent: object) -> No
 
 
 @pytest.mark.unit
+def test_planner_node_missing_unified_columns(
+    sample_data_profile: object, sample_analysis_intent: object
+) -> None:
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+        data_profile=sample_data_profile,
+        analysis_intent=sample_analysis_intent,
+    )
+
+    new_state = planner_node(state)
+
+    assert "error" in new_state
+    assert "unified_columns" in new_state["error"]
+
+
+@pytest.mark.unit
 def test_planner_node_missing_analysis_intent(sample_data_profile: object) -> None:
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="清洗建议。",
+        unified_columns=["销量", "地区"],
     )
 
     new_state = planner_node(state)
@@ -219,7 +247,7 @@ def test_planner_node_invalid_json(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="清洗建议。",
+        unified_columns=["销量", "地区"],
         analysis_intent=sample_analysis_intent,
     )
 
@@ -240,14 +268,14 @@ def test_planner_node_multiple_units(
 
     multi_json = (
         '{"cleaning": {"purpose": "清洗数据", "model": null, '
-        '"cautious": "注意空值", "depends_on": []}, '
+        '"cautious": "注意空值", "depends_on": [], "related_fields": ["销量"]}, '
         '"units": ['
         '{"unit_id": 1, "purpose": "相关性分析", "model": "皮尔逊相关", '
-        '"cautious": "样本量可能不足", "depends_on": []},'
+        '"cautious": "样本量可能不足", "depends_on": [], "related_fields": ["销量", "地区"]},'
         '{"unit_id": 2, "purpose": "聚类分析", "model": "KMeans", '
-        '"cautious": "需先标准化", "depends_on": []},'
+        '"cautious": "需先标准化", "depends_on": [], "related_fields": ["销量"]},'
         '{"unit_id": 3, "purpose": "趋势预测", "model": "线性回归", '
-        '"cautious": "时间序列需验证平稳性", "depends_on": []}'
+        '"cautious": "时间序列需验证平稳性", "depends_on": [], "related_fields": ["日期", "销量"]}'
         '], '
         '"alignment_notes": "三个分析维度覆盖了用户问题的核心方面。"}'
     )
@@ -261,7 +289,7 @@ def test_planner_node_multiple_units(
         file_path="/tmp/test.csv",
         user_requirement="全面分析销售数据",
         data_profile=sample_data_profile,
-        cleaning_insights="清洗建议。",
+        unified_columns=["销量", "地区", "日期"],
         analysis_intent=sample_analysis_intent,
     )
 
@@ -277,6 +305,72 @@ def test_planner_node_multiple_units(
     assert plan.units[1].model == "KMeans"
 
 
+# --- Review mode tests ---
+
+
+@pytest.mark.unit
+def test_planner_node_review_mode(
+    set_llm_env: None,
+    sample_data_profile: object,
+) -> None:
+    _ = set_llm_env
+
+    from src.agent.state import Plan, PlanUnit
+
+    draft = Plan(
+        cleaning=PlanUnit(
+            unit_id=0,
+            purpose="处理缺失值",
+            cautious="注意0值",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1,
+                purpose="按地区分析趋势",
+                model="线性回归",
+                cautious="地区列有缺失",
+                related_fields=["地区", "nonexistent_field"],
+            )
+        ],
+        alignment_notes="用户草稿。",
+    )
+
+    review_json = (
+        '{"cleaning": {"purpose": "处理缺失值", "model": null, '
+        '"cautious": "注意0值", "depends_on": [], "related_fields": ["销量"]}, '
+        '"units": [{"unit_id": 1, "purpose": "按地区分析趋势", '
+        '"model": "线性回归", "cautious": "地区列有缺失", '
+        '"depends_on": [], "related_fields": ["地区", "日期"]}], '
+        '"alignment_notes": "审核摘要: 1处修正 | 修正项: 移除不存在的字段nonexistent_field"}'
+    )
+
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = review_json
+    mock_llm.invoke.return_value = mock_response
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze by region",
+        data_profile=sample_data_profile,
+        unified_columns=["销量", "地区", "日期"],
+        draft_plan=draft,
+    )
+
+    with patch("src.agent.nodes.planner.get_llm", return_value=mock_llm):
+        new_state = planner_node(state)
+
+    assert "plan" in new_state
+    assert "error" not in new_state
+    plan = new_state["plan"]
+    assert isinstance(plan, Plan)
+    assert "审核摘要" in plan.alignment_notes
+    assert "nonexistent_field" not in [f for u in plan.units for f in u.related_fields]
+    # draft_plan should NOT be consumed — kept in state
+    assert state.draft_plan is not None
+
+
 # --- M3: Planner consumes enriched AnalysisIntent ---
 
 
@@ -287,8 +381,8 @@ def test_planner_prompt_includes_suggestions(
     """Planner prompt should include suggestion hooks from AnalysisIntent."""
     prompt = _build_planner_prompt(
         sample_data_profile.model_dump_json(indent=2),
-        "清洗建议。",
         sample_analysis_intent.model_dump_json(indent=2),
+        unified_columns=["销量", "地区", "日期"],
     )
 
     assert "STRONG HINTS" in prompt
@@ -316,7 +410,7 @@ def test_planner_node_with_rich_intent(
         file_path="/tmp/test.csv",
         user_requirement="Why did Q2 sales drop by 15%?",
         data_profile=sample_data_profile,
-        cleaning_insights="清洗建议。",
+        unified_columns=["销量", "地区", "日期"],
         analysis_intent=sample_analysis_intent,
     )
 
@@ -330,3 +424,44 @@ def test_planner_node_with_rich_intent(
     assert "plan" in new_state
     assert "error" not in new_state
     assert isinstance(new_state["plan"], Plan)
+
+
+@pytest.mark.unit
+def test_build_planner_review_prompt_structure(
+    sample_data_profile: object, sample_analysis_intent: object
+) -> None:
+    """Review mode prompt should contain validation rules."""
+    from src.agent.state import Plan, PlanUnit
+
+    draft = Plan(
+        cleaning=PlanUnit(
+            unit_id=0,
+            purpose="处理缺失值",
+            cautious="注意0值",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1,
+                purpose="按地区分析趋势",
+                model="线性回归",
+                cautious="地区列有缺失",
+                related_fields=["地区", "wrong_col"],
+            )
+        ],
+        alignment_notes="用户草稿。",
+    )
+
+    prompt = _build_planner_review_prompt(
+        draft.model_dump_json(indent=2),
+        sample_data_profile.model_dump_json(indent=2),
+        unified_columns=["销量", "地区", "日期"],
+        analysis_intent_json=sample_analysis_intent.model_dump_json(indent=2),
+    )
+
+    assert "REVIEW mode" in prompt
+    assert "AUDIT" in prompt
+    assert "AVAILABLE COLUMNS" in prompt
+    assert "wrong_col" in prompt  # draft plan content embedded
+    assert "related_fields" in prompt
+    assert "审核摘要" in prompt

@@ -53,7 +53,6 @@ def _serialize_analysis_result(analysis_result: dict[str, object]) -> str:
 
 
 def _build_full_report_prompt(
-    cleaning_insights: str,
     data_profile_json: str,
     analysis_intent_json: str,
     alignment_notes: str,
@@ -87,10 +86,10 @@ Report structure (use exactly these headings):
 to the user's question.
 
 ## 1. 数据画像与清洗
-Summarize the Data Profile and Cleaning Insights:
-- Dataset shape and key columns
-- Data quality issues found
-- Cleaning actions performed
+Summarize the Data Profile:
+- Dataset shape and key columns (from DATA PROFILE below)
+- Data quality (null rates, dtypes per column from DATA PROFILE)
+- Cleaning actions performed (from the Plan's cleaning unit)
 
 ## 2. 业务分析意图
 Summarize the Analysis Intent:
@@ -131,12 +130,6 @@ of what each shows. Use `- **filename.png**: description` format.
 
 ---
 
-**CLEANING INSIGHTS:**
-
-{cleaning_insights}
-
----
-
 **DATA PROFILE (JSON):**
 
 {data_profile_json}
@@ -162,7 +155,6 @@ of what each shows. Use `- **filename.png**: description` format.
 
 
 def _build_partial_report_prompt(
-    cleaning_insights: str,
     data_profile_json: str,
     analysis_intent_json: str,
     alignment_notes: str,
@@ -191,7 +183,7 @@ but the automated analysis phase failed. The report below contains all
 pre-execution findings.
 
 ## 1. 数据画像与清洗
-(Summarize Data Profile and Cleaning Insights)
+(Summarize data quality from DATA PROFILE — shape, columns, null rates, dtypes)
 
 ## 2. 业务分析意图
 (Summarize analysis_intent)
@@ -219,12 +211,6 @@ What the user can do next.
 
 ---
 
-**CLEANING INSIGHTS:**
-
-{cleaning_insights}
-
----
-
 **DATA PROFILE (JSON):**
 
 {data_profile_json}
@@ -247,11 +233,10 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
     """Stage 4 — Report Generation: assemble Markdown report with mandatory
     alignment notes.
 
-    Reads: state.cleaning_insights, state.data_profile, state.analysis_intent,
-           state.plan, state.analysis_result, state.error, state.user_requirement
+    Reads: state.data_profile, state.analysis_intent, state.plan,
+           state.analysis_result, state.error, state.user_requirement
     Writes: state.final_report
     """
-    cleaning_insights = state.cleaning_insights or ""
     data_profile = state.data_profile
     analysis_intent = state.analysis_intent
     analysis_result = state.analysis_result or {}
@@ -270,7 +255,6 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
         logger.info("Report Gen: assembling full report")
         result_json = _serialize_analysis_result(analysis_result)
         prompt = _build_full_report_prompt(
-            cleaning_insights,
             data_profile_json,
             intent_json,
             alignment_notes,
@@ -288,7 +272,6 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
             indent=2,
         )
         prompt = _build_partial_report_prompt(
-            cleaning_insights,
             data_profile_json,
             intent_json,
             alignment_notes,

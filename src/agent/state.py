@@ -63,6 +63,7 @@ class PlanUnit(BaseModel):
     model: str | None = None
     cautious: str
     depends_on: list[int] = []
+    related_fields: list[str] = []
 
 
 class Plan(BaseModel):
@@ -89,6 +90,8 @@ class AgentState(BaseModel):
     user_requirement: str
     data_profile: DataProfile | None = None
     cleaning_insights: str | None = None
+    unified_columns: list[str] = []
+    draft_plan: Plan | None = None
     analysis_intent: AnalysisIntent | None = None
     plan: Plan | None = None
     preprocessing_result: dict[str, Any] | None = None

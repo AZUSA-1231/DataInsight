@@ -8,6 +8,7 @@ import pytest
 from src.agent.graph import (
     _should_iterate,
     _should_retry_preprocessing,
+    _should_skip_business_track,
     build_graph,
 )
 from src.agent.state import AgentState, AnalysisIntent
@@ -29,6 +30,7 @@ _PLAN_JSON = json.dumps(
             "model": None,
             "cautious": "0值可能是实际数据",
             "depends_on": [],
+            "related_fields": ["销量"],
         },
         "units": [
             {
@@ -37,6 +39,7 @@ _PLAN_JSON = json.dumps(
                 "model": "线性回归",
                 "cautious": "region列有2%缺失值",
                 "depends_on": [],
+                "related_fields": ["销量", "地区"],
             }
         ],
         "alignment_notes": "基于当前数据，本报告能够部分回答用户问题。",
@@ -64,22 +67,46 @@ def test_graph_node_names() -> None:
     assert "report_gen" in node_names
 
 
+# --- _should_skip_business_track unit tests ---
+
+
+@pytest.mark.unit
+def test_should_skip_business_track_no_draft() -> None:
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze",
+    )
+    assert _should_skip_business_track(state) == "business_track"
+
+
+@pytest.mark.unit
+def test_should_skip_business_track_with_draft() -> None:
+    from src.agent.state import Plan, PlanUnit
+
+    draft = Plan(
+        cleaning=PlanUnit(unit_id=0, purpose="clean", cautious="x", related_fields=[]),
+        units=[PlanUnit(unit_id=1, purpose="analyze", cautious="y", related_fields=[])],
+        alignment_notes="draft",
+    )
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze",
+        draft_plan=draft,
+    )
+    assert _should_skip_business_track(state) == "planner"
+
+
 @pytest.mark.integration
 def test_graph_data_track_integration(
     sample_csv_path: str, set_llm_env: None) -> None:
-    """Invoke the graph with parallel data_track + business_track and mocked downstream nodes."""
+    """Invoke graph: serial data_track → business_track → planner, mocked downstream."""
     _ = set_llm_env
-
-    mock_dt = MagicMock()
-    mock_dt.invoke.return_value = MagicMock(content="## 数据清洗建议\n\nCleaning insights.")
 
     mock_bt = MagicMock()
     mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
-    mock_dm.invoke.return_value = MagicMock(
-        content=_PLAN_JSON
-    )
+    mock_dm.invoke.return_value = MagicMock(content=_PLAN_JSON)
 
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
@@ -117,7 +144,6 @@ def test_graph_data_track_integration(
     graph = build_graph()
 
     with (
-        patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
@@ -128,8 +154,7 @@ def test_graph_data_track_integration(
     ):
         graph.invoke(state)
 
-    # Both parallel tracks should have been called
-    mock_dt.invoke.assert_called_once()
+    # data_track is now deterministic (no LLM), business_track still uses LLM
     mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
     mock_an.invoke.assert_called_once()
@@ -138,17 +163,12 @@ def test_graph_data_track_integration(
 @pytest.mark.integration
 def test_graph_m2_full_pipeline(
     sample_csv_path: str, set_llm_env: None) -> None:
-    """Full M1+M2 pipeline: data_track → business_track → planner."""
+    """Full pipeline: data_track → business_track → planner."""
     _ = set_llm_env
 
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
     from src.agent.nodes.planner import planner_node
-
-    mock_dt = MagicMock()
-    mock_dt_response = MagicMock()
-    mock_dt_response.content = "## 数据清洗建议\n\nCleaning insights."
-    mock_dt.invoke.return_value = mock_dt_response
 
     mock_bt = MagicMock()
     mock_bt_response = MagicMock()
@@ -166,7 +186,6 @@ def test_graph_m2_full_pipeline(
     )
 
     with (
-        patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
     ):
@@ -177,15 +196,14 @@ def test_graph_m2_full_pipeline(
         dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
 
-    mock_dt.invoke.assert_called_once()
     mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
 
     assert state.data_profile is not None
-    assert state.cleaning_insights is not None
+    assert state.unified_columns is not None
+    assert len(state.unified_columns) == 5  # name, age, salary, dept, hire_date
     assert state.analysis_intent is not None
     assert state.plan is not None
-    assert "数据清洗建议" in (state.cleaning_insights or "")
     assert isinstance(state.analysis_intent, AnalysisIntent)
     assert state.analysis_intent.analysis_type == "diagnostic"
     assert len(state.plan.units) == 1
@@ -196,7 +214,7 @@ def test_graph_m2_full_pipeline(
 @pytest.mark.integration
 def test_graph_m3_execution_integration(
     sample_csv_path: str, set_llm_env: None, temp_output_dir: str) -> None:
-    """Full M1+M2+M3a+M3b pipeline: data_track, business_track, planner,
+    """Full pipeline: data_track, business_track, planner,
     preprocessing, analysis with mocked LLMs and sandbox."""
     _ = set_llm_env
 
@@ -207,16 +225,11 @@ def test_graph_m3_execution_integration(
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.sandbox.executor import SandboxResult
 
-    mock_dt = MagicMock()
-    mock_dt.invoke.return_value = MagicMock(content="## 数据清洗建议\n\nClean.")
-
     mock_bt = MagicMock()
     mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
-    mock_dm.invoke.return_value = MagicMock(
-        content=_PLAN_JSON
-    )
+    mock_dm.invoke.return_value = MagicMock(content=_PLAN_JSON)
 
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
@@ -250,7 +263,6 @@ def test_graph_m3_execution_integration(
     )
 
     with (
-        patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
@@ -270,6 +282,7 @@ def test_graph_m3_execution_integration(
         state = AgentState(**(state.model_dump() | an_update))
 
     assert state.data_profile is not None
+    assert state.unified_columns is not None
     assert state.analysis_intent is not None
     assert state.plan is not None
     assert state.preprocessing_result is not None
@@ -283,7 +296,6 @@ def test_graph_m3_execution_integration(
     assert result["unit_results"][0]["status"] == "success"
     assert result["unit_results"][0]["insights"] == ["Sales rose in Q3"]
 
-    mock_dt.invoke.assert_called_once()
     mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
     mock_an.invoke.assert_called_once()
@@ -334,16 +346,11 @@ def test_graph_m4_full_pipeline(
     from src.agent.nodes.report_gen import report_gen_node
     from src.sandbox.executor import SandboxResult
 
-    mock_dt = MagicMock()
-    mock_dt.invoke.return_value = MagicMock(content="## 数据清洗建议\n\nClean.")
-
     mock_bt = MagicMock()
     mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
 
     mock_dm = MagicMock()
-    mock_dm.invoke.return_value = MagicMock(
-        content=_PLAN_JSON
-    )
+    mock_dm.invoke.return_value = MagicMock(content=_PLAN_JSON)
 
     mock_pre = MagicMock()
     mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
@@ -379,7 +386,6 @@ def test_graph_m4_full_pipeline(
     )
 
     with (
-        patch("src.agent.nodes.data_track.get_llm", return_value=mock_dt),
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
@@ -430,7 +436,7 @@ def test_graph_feedback_iteration(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="## 数据清洗建议\nClean.",
+        unified_columns=["销量", "地区", "日期"],
         analysis_intent=sample_analysis_intent,
         feedback="The chart on regional sales is wrong, use monthly data instead.",
     )
@@ -444,6 +450,7 @@ def test_graph_feedback_iteration(
                     "model": None,
                     "cautious": "0值可能是实际数据",
                     "depends_on": [],
+                    "related_fields": ["销量"],
                 },
                 "units": [
                     {
@@ -452,6 +459,7 @@ def test_graph_feedback_iteration(
                         "model": "pandas.DataFrame.resample",
                         "cautious": "日期格式需统一",
                         "depends_on": [],
+                        "related_fields": ["日期", "销量"],
                     }
                 ],
                 "alignment_notes": "修订版：基于用户反馈改用月度分组。",

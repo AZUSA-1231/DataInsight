@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent.nodes.data_track import (
-    _build_cleaning_insights_prompt,
-    _parse_data_profile,
-    data_track_node,
-)
+from src.agent.nodes.data_track import _parse_data_profile, data_track_node
 from src.agent.state import AgentState, ColumnProfile, DataProfile
 
 
@@ -85,51 +80,28 @@ def test_parse_data_profile() -> None:
 
 
 @pytest.mark.unit
-def test_build_cleaning_insights_prompt_structure() -> None:
-    profile = _make_minimal_profile()
-    prompt = _build_cleaning_insights_prompt(profile)
-
-    assert "数据清洗建议" in prompt
-    assert "需强清洗字段" in prompt
-    assert "清洗策略" in prompt
-    assert "数据质量总评" in prompt
-    assert "sales" in prompt  # profile data embedded
-
-
-@pytest.mark.unit
-def test_build_cleaning_insights_prompt_excludes_business_analysis() -> None:
-    profile = _make_minimal_profile()
-    prompt = _build_cleaning_insights_prompt(profile)
-
-    assert "do not suggest business metrics" in prompt.lower()
-    assert "do not produce a full audit report" in prompt.lower()
-    assert "stay in your lane" in prompt.lower()
-
-
-@pytest.mark.unit
 def test_data_track_node_success(sample_csv_path: str, set_llm_env: None) -> None:
     _ = set_llm_env  # fixture side effect
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = "## 数据清洗建议\n\n清洗策略内容。"
-    mock_llm.invoke.return_value = mock_response
 
     state = AgentState(
         file_path=sample_csv_path,
         user_requirement="Analyze sales trend",
     )
 
-    with patch("src.agent.nodes.data_track.get_llm", return_value=mock_llm):
-        new_state = data_track_node(state)
+    new_state = data_track_node(state)
 
     assert "data_profile" in new_state
-    assert "cleaning_insights" in new_state
+    assert "unified_columns" in new_state
     assert "error" not in new_state
     assert isinstance(new_state["data_profile"], DataProfile)
     assert new_state["data_profile"].shape[0] == 5  # 5 rows in sample CSV
-    assert "数据清洗建议" in new_state["cleaning_insights"]
-    mock_llm.invoke.assert_called_once()
+    assert "name" in new_state["unified_columns"]  # CSV columns
+    assert "age" in new_state["unified_columns"]
+    assert "salary" in new_state["unified_columns"]
+    assert "dept" in new_state["unified_columns"]
+    assert "hire_date" in new_state["unified_columns"]
+    # No longer calls LLM — cleaning_insights should NOT be in result
+    assert "cleaning_insights" not in new_state
 
 
 @pytest.mark.unit
@@ -144,25 +116,21 @@ def test_data_track_node_inspection_failure() -> None:
     assert "error" in new_state
     assert new_state["error"] is not None
     assert "data_profile" not in new_state
-    assert "cleaning_insights" not in new_state
+    assert "unified_columns" not in new_state
 
 
 @pytest.mark.unit
 def test_data_track_node_preserves_state(sample_csv_path: str, set_llm_env: None) -> None:
     _ = set_llm_env
 
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = "Cleaning insights content."
-    mock_llm.invoke.return_value = mock_response
-
     state = AgentState(
         file_path=sample_csv_path,
         user_requirement="Why did sales drop?",
     )
 
-    with patch("src.agent.nodes.data_track.get_llm", return_value=mock_llm):
-        new_state = data_track_node(state)
+    new_state = data_track_node(state)
 
-    assert new_state["cleaning_insights"] == "Cleaning insights content."
+    assert "unified_columns" in new_state
     assert isinstance(new_state["data_profile"], DataProfile)
+    assert len(new_state["unified_columns"]) == 5
+    assert "cleaning_insights" not in new_state

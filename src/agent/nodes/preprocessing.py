@@ -30,6 +30,7 @@ def _serialize_cleaning_unit(cleaning: PlanUnit) -> str:
             "unit_id": cleaning.unit_id,
             "purpose": cleaning.purpose,
             "cautious": cleaning.cautious,
+            "related_fields": cleaning.related_fields,
         },
         indent=2,
         ensure_ascii=False,
@@ -63,7 +64,10 @@ CRITICAL RULES:
    progress and debug messages.
 9. Always verify column existence before operating on them — the cleaning steps
    may reference columns that don't exist in the actual data.
-10. Include `if __name__ == "__main__":` guard.
+10. The "related_fields" list specifies which columns this cleaning step should
+    focus on. Prioritize these columns for quality checks, but don't ignore
+    other columns that may need attention.
+11. Include `if __name__ == "__main__":` guard.
 
 ---
 

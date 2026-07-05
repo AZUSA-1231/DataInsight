@@ -36,6 +36,7 @@ def _serialize_unit(unit: PlanUnit) -> str:
             "purpose": unit.purpose,
             "model": unit.model or "auto",
             "cautious": unit.cautious,
+            "related_fields": unit.related_fields,
         },
         indent=2,
         ensure_ascii=False,
@@ -70,7 +71,10 @@ CRITICAL RULES:
    progress and debug messages.
 11. Verify column existence and dtypes before operating — the analysis task may
    reference columns that don't exist in the actual data.
-12. Include `if __name__ == "__main__":` guard.
+12. The "related_fields" list specifies which columns this analysis should focus
+    on. Prioritize these columns — they are the user's intended analytical
+    dimensions. Other columns may be used as needed for context.
+13. Include `if __name__ == "__main__":` guard.
 
 ---
 

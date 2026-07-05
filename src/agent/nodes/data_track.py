@@ -4,7 +4,6 @@ import json
 import logging
 import os
 
-from src.agent.llm import get_llm
 from src.agent.state import AgentState, ColumnProfile, DataProfile
 from src.sandbox.executor import SandboxResult, run_script
 
@@ -41,47 +40,12 @@ def _parse_data_profile(inspection_json: str) -> DataProfile:
     )
 
 
-def _build_cleaning_insights_prompt(data_profile: DataProfile) -> str:
-    """Build a prompt asking the LLM for concise cleaning recommendations only."""
-    profile_json = data_profile.model_dump_json(indent=2)
-    return f"""You are a strict data quality specialist. Your ONLY job is to review the
-structured data profile below and produce concise, actionable cleaning recommendations.
-
-DO NOT produce a full audit report. DO NOT suggest business metrics or analysis methods.
-You are the DATA track — stay in your lane.
-
-Output structure (use exactly these headings in Chinese):
-
-## 数据清洗建议
-
-### 1. 需强清洗字段
-For each column with data quality issues (high null%, wrong dtype, outliers):
-- Column name, what is wrong, and the specific cleaning action
-- Flag: **[高缺失]** (>30% null), **[严重缺失/建议禁用]** (>90% null), **[类型问题]** (wrong dtype)
-
-### 2. 清洗策略
-Concrete, ordered steps for preprocessing:
-- Drop columns/rows: which ones and under what threshold?
-- Impute missing values: which method (mean/median/mode/forward-fill) per column?
-- Type conversions: which columns need dtype fixes?
-- Encode categoricals: which columns and which method (one-hot/label)?
-
-### 3. 数据质量总评
-One grade (A/B/C/D/F) and one-sentence justification. Be brief.
-
----
-**DATA PROFILE (JSON):**
-
-{profile_json}
-"""
-
-
 def data_track_node(state: AgentState) -> dict[str, object]:
-    """Stage 1a — Data Track: deterministic inspection → structured profile,
-    then LLM produces concise cleaning insights.
+    """Stage 1 — Data Track: deterministic inspection → structured profile
+    and unified column list extraction.
 
     Reads: state.file_path
-    Writes: state.data_profile, state.cleaning_insights
+    Writes: state.data_profile, state.unified_columns
     """
     file_path = state.file_path
     logger.info("Data Track: inspecting %s", file_path)
@@ -98,24 +62,12 @@ def data_track_node(state: AgentState) -> dict[str, object]:
         logger.error("Failed to parse inspection output: %s", e)
         return {"error": f"Failed to parse inspection output: {e}"}
 
+    unified_columns = [col.name for col in data_profile.columns]
     logger.info(
-        "Data Track: profile parsed — %d columns, shape=%s",
+        "Data Track: profile parsed — %d columns, shape=%s; unified_columns=%s",
         len(data_profile.columns),
         data_profile.shape,
+        unified_columns,
     )
 
-    prompt = _build_cleaning_insights_prompt(data_profile)
-    try:
-        llm = get_llm(temperature=0)
-        response = llm.invoke(prompt)
-        content = response.content if hasattr(response, "content") else str(response)
-        cleaning_insights = str(content) if not isinstance(content, str) else content
-    except Exception as e:
-        logger.error("Data Track: LLM call failed: %s", e)
-        return {
-            "error": f"Data Track LLM error: {e}",
-            "data_profile": data_profile,
-        }
-
-    logger.info("Data Track: cleaning insights generated (%d chars)", len(cleaning_insights))
-    return {"data_profile": data_profile, "cleaning_insights": cleaning_insights}
+    return {"data_profile": data_profile, "unified_columns": unified_columns}

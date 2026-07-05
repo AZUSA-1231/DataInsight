@@ -20,6 +20,7 @@ def test_serialize_unit(sample_plan: object) -> None:
     text = _serialize_unit(unit)
     assert "按区域分析销售趋势" in text
     assert "线性回归" in text
+    assert "related_fields" in text
 
 
 @pytest.mark.unit

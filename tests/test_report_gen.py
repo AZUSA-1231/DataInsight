@@ -69,7 +69,6 @@ def test_build_full_report_prompt_structure(
     sample_data_profile: object, sample_analysis_intent: object
 ) -> None:
     prompt = _build_full_report_prompt(
-        "清洗建议内容。",
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
         "数据与业务对齐备忘：测试。",
@@ -86,14 +85,15 @@ def test_build_full_report_prompt_structure(
     assert "图表清单" in prompt
     assert "局限性与后续建议" in prompt
     assert "Why did sales drop?" in prompt
-    assert "清洗建议内容" in prompt
+    assert "DATA PROFILE" in prompt
     assert "数据与业务对齐备忘：测试" in prompt
+    # No longer references cleaning_insights
+    assert "CLEANING INSIGHTS" not in prompt
 
 
 @pytest.mark.unit
 def test_build_full_report_prompt_mandatory_alignment() -> None:
     prompt = _build_full_report_prompt(
-        "CI",
         "{}",
         "{}",
         "对齐备忘。",
@@ -108,7 +108,6 @@ def test_build_partial_report_prompt_structure(
     sample_data_profile: object, sample_analysis_intent: object
 ) -> None:
     prompt = _build_partial_report_prompt(
-        "清洗建议。",
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
         "对齐备忘。",
@@ -120,7 +119,8 @@ def test_build_partial_report_prompt_structure(
     assert "执行错误说明" in prompt
     assert "NameError" in prompt
     assert "数据与业务对齐备忘" in prompt
-    assert "清洗建议" in prompt
+    assert "DATA PROFILE" in prompt
+    assert "CLEANING INSIGHTS" not in prompt
 
 
 @pytest.mark.unit
@@ -142,7 +142,6 @@ def test_report_gen_node_full_report(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="## 数据清洗建议\n清洗。",
         analysis_intent=sample_analysis_intent,
         plan=make_plan(),
         analysis_result=sample_analysis_result,
@@ -175,7 +174,6 @@ def test_report_gen_node_partial_report(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
         data_profile=sample_data_profile,
-        cleaning_insights="清洗建议。",
         analysis_intent=sample_analysis_intent,
         plan=make_plan(),
         error="Analysis error (attempt 3/3): NameError",
@@ -207,7 +205,6 @@ def test_report_gen_node_preserves_state(
         file_path="/tmp/test.csv",
         user_requirement="Why?",
         data_profile=sample_data_profile,
-        cleaning_insights="CI",
         analysis_intent=sample_analysis_intent,
         plan=make_plan(),
         analysis_result=sample_analysis_result,
@@ -235,7 +232,6 @@ def test_report_gen_node_llm_error(
         file_path="/tmp/test.csv",
         user_requirement="Why?",
         data_profile=sample_data_profile,
-        cleaning_insights="CI",
         analysis_intent=sample_analysis_intent,
         plan=make_plan(),
     )
@@ -265,7 +261,6 @@ def test_report_gen_node_uses_plan_alignment(
         file_path="/tmp/test.csv",
         user_requirement="Why?",
         data_profile=sample_data_profile,
-        cleaning_insights="CI",
         analysis_intent=sample_analysis_intent,
         plan=plan,
         analysis_result=sample_analysis_result,
@@ -286,7 +281,7 @@ def test_report_gen_node_uses_plan_alignment(
 def test_full_report_prompt_has_per_unit_instructions() -> None:
     """Full report prompt must instruct LLM to produce one subsection per unit."""
     prompt = _build_full_report_prompt(
-        "CI", "{}", "{}", "对齐。",
+        "{}", "{}", "对齐。",
         '{"status": "complete", "unit_results": []}',
         "question",
     )
@@ -306,7 +301,7 @@ def test_full_report_prompt_multi_unit() -> None:
         "]}"
     )
     prompt = _build_full_report_prompt(
-        "CI", "{}", "{}", "对齐。", result_json, "question",
+        "{}", "{}", "对齐。", result_json, "question",
     )
     assert "分析执行与结果" in prompt
     assert "subsection" in prompt
@@ -318,7 +313,7 @@ def test_partial_report_prompt_includes_plan_units() -> None:
     """Partial report prompt should include planned units JSON for the LLM to list."""
     plan_units_json = '[{"unit_id": 1, "purpose": "趋势分析", "model": "线性回归"}]'
     prompt = _build_partial_report_prompt(
-        "CI", "{}", "{}", "对齐。", "error", "q", plan_units_json,
+        "{}", "{}", "对齐。", "error", "q", plan_units_json,
     )
     assert "趋势分析" in prompt
     assert "线性回归" in prompt
@@ -343,7 +338,6 @@ def test_report_gen_node_passes_plan_units_to_partial(
         file_path="/tmp/test.csv",
         user_requirement="Analyze",
         data_profile=sample_data_profile,
-        cleaning_insights="CI",
         analysis_intent=sample_analysis_intent,
         plan=sample_plan_multi,
         error="Analysis failed",

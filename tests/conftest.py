@@ -91,7 +91,7 @@ def sample_data_profile() -> object:
         shape=(100, 5),
         columns=[
             ColumnProfile(
-                name="sales",
+                name="销量",
                 dtype="float64",
                 null_count=0,
                 null_pct=0.0,
@@ -99,7 +99,7 @@ def sample_data_profile() -> object:
                 unique_pct=50.0,
             ),
             ColumnProfile(
-                name="region",
+                name="地区",
                 dtype="object",
                 null_count=2,
                 null_pct=2.0,
@@ -107,7 +107,7 @@ def sample_data_profile() -> object:
                 unique_pct=4.0,
             ),
             ColumnProfile(
-                name="date",
+                name="日期",
                 dtype="object",
                 null_count=0,
                 null_pct=0.0,
@@ -116,12 +116,12 @@ def sample_data_profile() -> object:
             ),
         ],
         statistics={
-            "sales": {"mean": 500.0, "std": 150.0, "min": 100.0, "max": 900.0},
-            "region": {"count": 98, "unique": 4, "top": "East", "freq": 30},
+            "销量": {"mean": 500.0, "std": 150.0, "min": 100.0, "max": 900.0},
+            "地区": {"count": 98, "unique": 4, "top": "East", "freq": 30},
         },
         head_sample=[
-            {"sales": 500.0, "region": "East", "date": "2024-01-15"},
-            {"sales": 300.0, "region": "West", "date": "2024-01-16"},
+            {"销量": 500.0, "地区": "East", "日期": "2024-01-15"},
+            {"销量": 300.0, "地区": "West", "日期": "2024-01-16"},
         ],
     )
 
@@ -173,6 +173,7 @@ def sample_plan() -> object:
             unit_id=0,
             purpose="处理缺失值和异常值",
             cautious="0值可能是实际销售数据而非缺失",
+            related_fields=[],
         ),
         units=[
             PlanUnit(
@@ -180,6 +181,7 @@ def sample_plan() -> object:
                 purpose="按区域分析销售趋势",
                 model="线性回归",
                 cautious="region列有2%缺失值",
+                related_fields=[],
             )
         ],
         alignment_notes="基于当前数据，能够部分回答用户问题。",
@@ -196,6 +198,7 @@ def sample_plan_multi() -> object:
             unit_id=0,
             purpose="处理缺失值和异常值",
             cautious="0值可能是实际销售数据",
+            related_fields=[],
         ),
         units=[
             PlanUnit(
@@ -203,18 +206,21 @@ def sample_plan_multi() -> object:
                 purpose="相关性分析",
                 model="皮尔逊相关",
                 cautious="样本量可能不足",
+                related_fields=[],
             ),
             PlanUnit(
                 unit_id=2,
                 purpose="聚类分析",
                 model="KMeans",
                 cautious="需先标准化",
+                related_fields=[],
             ),
             PlanUnit(
                 unit_id=3,
                 purpose="趋势预测",
                 model="线性回归",
                 cautious="时间序列需验证平稳性",
+                related_fields=[],
             ),
         ],
         alignment_notes="三个分析维度覆盖了用户问题的核心方面。",
@@ -238,6 +244,7 @@ def make_plan() -> Callable[..., object]:
                 unit_id=0,
                 purpose="处理缺失值和异常值",
                 cautious="0值可能是实际销售数据而非缺失",
+                related_fields=[],
             )
 
         units = overrides.get("units")
@@ -248,6 +255,7 @@ def make_plan() -> Callable[..., object]:
                     purpose="按区域分析销售趋势",
                     model="线性回归",
                     cautious="region列有2%缺失值",
+                    related_fields=[],
                 )
             ]
 

@@ -14,6 +14,15 @@ from src.agent.nodes.report_gen import report_gen_node
 from src.agent.state import AgentState
 
 
+def _should_skip_business_track(
+    state: AgentState,
+) -> Literal["planner", "business_track"]:
+    """Skip business_track and go directly to planner when draft_plan is provided (review mode)."""
+    if state.draft_plan is not None:
+        return "planner"
+    return "business_track"
+
+
 def _should_retry_preprocessing(
     state: AgentState,
 ) -> Literal["preprocessing", "analysis", "report_gen"]:
@@ -37,28 +46,33 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
 
     Flow:
                     START
+                      |
+                      v
+                 data_track
                    /      \\
-                  v        v
-          data_track    business_track
-                  \\      /
-                   v    v
-              planner
-                   |
-                   v
-              preprocessing
-                /      \\
-       (success)    (error → ReAct × 3)
-              /          \\
-             v            v
-         analysis      report_gen (partial)
-             |
-             v
-        report_gen
-             |
-             v
-            END
-             ^
-             |___ feedback → planner
+         (draft_plan)  (no draft_plan)
+              /              \\
+             v                v
+          planner        business_track
+                            |
+                            v
+                          planner
+                            |
+                            v
+                      preprocessing
+                        /      \\
+               (success)    (error → ReAct × 3)
+                      /          \\
+                     v            v
+                 analysis      report_gen (partial)
+                     |
+                     v
+                report_gen
+                     |
+                     v
+                    END
+                     ^
+                     |___ feedback → planner
     """
     graph = StateGraph(AgentState)
 
@@ -69,11 +83,16 @@ def build_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]
     graph.add_node("analysis", analysis_node)
     graph.add_node("report_gen", report_gen_node)
 
-    # Parallel fan-out from START to both tracks
+    # Serial: START → data_track first, then conditionally route through business_track
     graph.add_edge(START, "data_track")
-    graph.add_edge(START, "business_track")
-    # Fan-in: both tracks converge at planner
-    graph.add_edge("data_track", "planner")
+    graph.add_conditional_edges(
+        "data_track",
+        _should_skip_business_track,
+        {
+            "planner": "planner",
+            "business_track": "business_track",
+        },
+    )
     graph.add_edge("business_track", "planner")
 
     # Planner → Preprocessing (with ReAct retry, fallback to report_gen)
