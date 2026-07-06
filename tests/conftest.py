@@ -279,3 +279,24 @@ def temp_output_dir() -> str:
 
     with tempfile.TemporaryDirectory(prefix="datainsight_test_") as tmpdir:
         yield tmpdir
+
+
+@pytest.fixture
+def api_client():
+    """FastAPI TestClient for API route tests."""
+    from fastapi.testclient import TestClient
+
+    from src.api.app import app
+    from src.api.session import SessionStore
+
+    # TestClient doesn't trigger lifespan — init session store manually
+    app.state.sessions = SessionStore()
+    return TestClient(app)
+
+
+@pytest.fixture
+def test_session(api_client):
+    """Create a test session and return its ID."""
+    resp = api_client.post("/api/sessions", json={"user_requirement": "分析销售数据"})
+    assert resp.status_code == 200
+    return resp.json()["session_id"]

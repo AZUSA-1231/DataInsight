@@ -8,7 +8,6 @@ import pytest
 from src.agent.graph import (
     _should_iterate,
     _should_retry_preprocessing,
-    _should_skip_business_track,
     build_graph,
 )
 from src.agent.state import AgentState, AnalysisIntent
@@ -67,33 +66,6 @@ def test_graph_node_names() -> None:
     assert "report_gen" in node_names
 
 
-# --- _should_skip_business_track unit tests ---
-
-
-@pytest.mark.unit
-def test_should_skip_business_track_no_draft() -> None:
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-    )
-    assert _should_skip_business_track(state) == "business_track"
-
-
-@pytest.mark.unit
-def test_should_skip_business_track_with_draft() -> None:
-    from src.agent.state import Plan, PlanUnit
-
-    draft = Plan(
-        cleaning=PlanUnit(unit_id=0, purpose="clean", cautious="x", related_fields=[]),
-        units=[PlanUnit(unit_id=1, purpose="analyze", cautious="y", related_fields=[])],
-        alignment_notes="draft",
-    )
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        draft_plan=draft,
-    )
-    assert _should_skip_business_track(state) == "planner"
 
 
 @pytest.mark.integration
@@ -422,15 +394,32 @@ def test_graph_feedback_iteration(
     sample_data_profile: object,
     sample_analysis_intent: object,
 ) -> None:
-    """Feedback loop: user feedback → planner revises → preprocessing →
-    analysis → report_gen regenerates."""
+    """Feedback loop: user feedback → business_track (re-parses intent) →
+    planner → preprocessing → analysis → report_gen regenerates."""
     _ = set_llm_env
 
     from src.agent.nodes.analysis import analysis_node
+    from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.planner import planner_node
     from src.agent.nodes.preprocessing import preprocessing_node
     from src.agent.nodes.report_gen import report_gen_node
+    from src.agent.state import Plan, PlanUnit
     from src.sandbox.executor import SandboxResult
+
+    # State with feedback and an existing plan (from a previous run)
+    existing_plan = Plan(
+        cleaning=PlanUnit(
+            unit_id=0, purpose="处理缺失值", cautious="0值可能是实际数据",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1, purpose="按区域分析销售趋势", model="线性回归",
+                cautious="region列有2%缺失值", related_fields=["销量", "地区"],
+            )
+        ],
+        alignment_notes="基于当前数据，能够部分回答用户问题。",
+    )
 
     state = AgentState(
         file_path="/tmp/test.csv",
@@ -438,8 +427,21 @@ def test_graph_feedback_iteration(
         data_profile=sample_data_profile,
         unified_columns=["销量", "地区", "日期"],
         analysis_intent=sample_analysis_intent,
+        plan=existing_plan,
         feedback="The chart on regional sales is wrong, use monthly data instead.",
     )
+
+    # Mock business_track — consumes feedback, produces updated intent
+    mock_bt = MagicMock()
+    mock_bt.invoke.return_value = MagicMock(content=json.dumps(
+        {
+            "core_question": "Analyze sales with monthly data",
+            "target_variable": "sales",
+            "analysis_type": "trend",
+            "dimensions": ["time period"],
+            "comparison_baseline": None,
+        }
+    ))
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(
@@ -495,6 +497,7 @@ def test_graph_feedback_iteration(
     )
 
     with (
+        patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
         patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
@@ -502,6 +505,8 @@ def test_graph_feedback_iteration(
         patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
+        bt_update = business_track_node(state)
+        state = AgentState(**(state.model_dump() | bt_update))
         dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
         pre_update = preprocessing_node(state)
@@ -517,6 +522,7 @@ def test_graph_feedback_iteration(
     assert state.final_report is not None
     assert state.error is None
 
+    mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
     mock_rg.invoke.assert_called_once()
 
@@ -533,4 +539,4 @@ def test_graph_should_iterate() -> None:
         user_requirement="",
         feedback="Change the chart type to bar",
     )
-    assert _should_iterate(state_with_feedback) == "planner"
+    assert _should_iterate(state_with_feedback) == "business_track"

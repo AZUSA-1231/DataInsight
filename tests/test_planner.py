@@ -6,7 +6,6 @@ import pytest
 
 from src.agent.nodes.planner import (
     _build_planner_prompt,
-    _build_planner_review_prompt,
     _extract_json,
     planner_node,
 )
@@ -49,6 +48,7 @@ def test_build_planner_prompt_structure(
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
         unified_columns=["销量", "地区", "日期"],
+        workspace_plan_json=None,
     )
 
     assert "cleaning" in prompt
@@ -69,6 +69,7 @@ def test_build_planner_prompt_mandatory_alignment(
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
         unified_columns=["销量", "地区"],
+        workspace_plan_json=None,
     )
 
     assert "MANDATORY" in prompt or "mandatory" in prompt.lower()
@@ -114,25 +115,18 @@ def test_planner_node_success(
 
 
 @pytest.mark.unit
-def test_planner_node_consumes_feedback(
+def test_planner_node_ignores_feedback(
     set_llm_env: None,
     sample_data_profile: object,
     sample_analysis_intent: object,
 ) -> None:
+    """In M2, planner does NOT handle feedback — feedback is consumed by business_track.
+    Planner should produce a normal plan even when feedback is present in state."""
     _ = set_llm_env
-
-    revised_json = (
-        '{"cleaning": {"purpose": "处理缺失值", "model": null, '
-        '"cautious": "注意0值", "depends_on": [], "related_fields": ["销量"]}, '
-        '"units": [{"unit_id": 1, "purpose": "月度趋势分析", '
-        '"model": "pandas.resample", "cautious": "日期格式需统一", '
-        '"depends_on": [], "related_fields": ["日期", "销量"]}], '
-        '"alignment_notes": "修订版：基于用户反馈改用月度分组。"}'
-    )
 
     mock_llm = MagicMock()
     mock_response = MagicMock()
-    mock_response.content = revised_json
+    mock_response.content = _PLAN_JSON
     mock_llm.invoke.return_value = mock_response
 
     state = AgentState(
@@ -149,8 +143,8 @@ def test_planner_node_consumes_feedback(
 
     assert "plan" in new_state
     assert isinstance(new_state["plan"], Plan)
-    assert new_state.get("feedback") is None
-    assert "修订版" in new_state["plan"].alignment_notes
+    # feedback is NOT consumed by planner (business_track handles it)
+    assert new_state.get("feedback", "NOT_PRESENT") == "NOT_PRESENT"
 
 
 @pytest.mark.unit
@@ -215,7 +209,18 @@ def test_planner_node_missing_unified_columns(
 
 
 @pytest.mark.unit
-def test_planner_node_missing_analysis_intent(sample_data_profile: object) -> None:
+def test_planner_node_missing_analysis_intent(
+    set_llm_env: None, sample_data_profile: object
+) -> None:
+    """In M2, planner tolerates missing analysis_intent — business_track always runs,
+    but planner can work with just data_profile + unified_columns."""
+    _ = set_llm_env
+
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = _PLAN_JSON
+    mock_llm.invoke.return_value = mock_response
+
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
@@ -223,11 +228,11 @@ def test_planner_node_missing_analysis_intent(sample_data_profile: object) -> No
         unified_columns=["销量", "地区"],
     )
 
-    new_state = planner_node(state)
+    with patch("src.agent.nodes.planner.get_llm", return_value=mock_llm):
+        new_state = planner_node(state)
 
-    assert "error" in new_state
-    assert "analysis_intent" in new_state["error"]
-    assert "plan" not in new_state
+    assert "plan" in new_state
+    assert "error" not in new_state
 
 
 @pytest.mark.unit
@@ -305,32 +310,29 @@ def test_planner_node_multiple_units(
     assert plan.units[1].model == "KMeans"
 
 
-# --- Review mode tests ---
+# --- M2: Workspace-aware planner tests ---
 
 
 @pytest.mark.unit
-def test_planner_node_review_mode(
+def test_planner_node_with_workspace_plan(
     set_llm_env: None,
     sample_data_profile: object,
+    sample_analysis_intent: object,
 ) -> None:
+    """Planner should accept workspace plan and produce a (revised) Plan."""
     _ = set_llm_env
 
     from src.agent.state import Plan, PlanUnit
 
-    draft = Plan(
+    workspace = Plan(
         cleaning=PlanUnit(
-            unit_id=0,
-            purpose="处理缺失值",
-            cautious="注意0值",
+            unit_id=0, purpose="处理缺失值", cautious="注意0值",
             related_fields=["销量"],
         ),
         units=[
             PlanUnit(
-                unit_id=1,
-                purpose="按地区分析趋势",
-                model="线性回归",
-                cautious="地区列有缺失",
-                related_fields=["地区", "nonexistent_field"],
+                unit_id=1, purpose="按地区分析趋势", model="线性回归",
+                cautious="地区列有缺失", related_fields=["地区", "nonexistent_field"],
             )
         ],
         alignment_notes="用户草稿。",
@@ -355,7 +357,8 @@ def test_planner_node_review_mode(
         user_requirement="Analyze by region",
         data_profile=sample_data_profile,
         unified_columns=["销量", "地区", "日期"],
-        draft_plan=draft,
+        analysis_intent=sample_analysis_intent,
+        plan=workspace,
     )
 
     with patch("src.agent.nodes.planner.get_llm", return_value=mock_llm):
@@ -367,8 +370,39 @@ def test_planner_node_review_mode(
     assert isinstance(plan, Plan)
     assert "审核摘要" in plan.alignment_notes
     assert "nonexistent_field" not in [f for u in plan.units for f in u.related_fields]
-    # draft_plan should NOT be consumed — kept in state
-    assert state.draft_plan is not None
+
+
+@pytest.mark.unit
+def test_build_planner_prompt_with_workspace(
+    sample_data_profile: object, sample_analysis_intent: object
+) -> None:
+    """Unified prompt should include WORKSPACE PLAN section when workspace is present."""
+    from src.agent.state import Plan, PlanUnit
+
+    workspace = Plan(
+        cleaning=PlanUnit(
+            unit_id=0, purpose="处理缺失值", cautious="注意0值",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1, purpose="按地区分析趋势", model="线性回归",
+                cautious="地区列有缺失", related_fields=["地区"],
+            )
+        ],
+        alignment_notes="用户草稿。",
+    )
+
+    prompt = _build_planner_prompt(
+        sample_data_profile.model_dump_json(indent=2),
+        sample_analysis_intent.model_dump_json(indent=2),
+        unified_columns=["销量", "地区", "日期"],
+        workspace_plan_json=workspace.model_dump_json(indent=2),
+    )
+
+    assert "WORKSPACE PLAN" in prompt
+    assert "用户草稿" in prompt
+    assert "reset_workspace" in prompt
 
 
 # --- M3: Planner consumes enriched AnalysisIntent ---
@@ -383,6 +417,7 @@ def test_planner_prompt_includes_suggestions(
         sample_data_profile.model_dump_json(indent=2),
         sample_analysis_intent.model_dump_json(indent=2),
         unified_columns=["销量", "地区", "日期"],
+        workspace_plan_json=None,
     )
 
     assert "STRONG HINTS" in prompt
@@ -426,42 +461,5 @@ def test_planner_node_with_rich_intent(
     assert isinstance(new_state["plan"], Plan)
 
 
-@pytest.mark.unit
-def test_build_planner_review_prompt_structure(
-    sample_data_profile: object, sample_analysis_intent: object
-) -> None:
-    """Review mode prompt should contain validation rules."""
-    from src.agent.state import Plan, PlanUnit
 
-    draft = Plan(
-        cleaning=PlanUnit(
-            unit_id=0,
-            purpose="处理缺失值",
-            cautious="注意0值",
-            related_fields=["销量"],
-        ),
-        units=[
-            PlanUnit(
-                unit_id=1,
-                purpose="按地区分析趋势",
-                model="线性回归",
-                cautious="地区列有缺失",
-                related_fields=["地区", "wrong_col"],
-            )
-        ],
-        alignment_notes="用户草稿。",
-    )
 
-    prompt = _build_planner_review_prompt(
-        draft.model_dump_json(indent=2),
-        sample_data_profile.model_dump_json(indent=2),
-        unified_columns=["销量", "地区", "日期"],
-        analysis_intent_json=sample_analysis_intent.model_dump_json(indent=2),
-    )
-
-    assert "REVIEW mode" in prompt
-    assert "AUDIT" in prompt
-    assert "AVAILABLE COLUMNS" in prompt
-    assert "wrong_col" in prompt  # draft plan content embedded
-    assert "related_fields" in prompt
-    assert "审核摘要" in prompt

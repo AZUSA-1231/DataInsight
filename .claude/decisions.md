@@ -209,3 +209,132 @@ data_track  ─┬→ unified_columns (表层: 列名) ──→ business_track 
 - LLM 自行判断：workspace 空 → 生成；workspace 有 + 用户措辞轻微 → 微调；workspace 有 + 用户说推倒 → 无视 workspace 重新生成
 
 **Risk**: business_track 现在消费 workspace，但 workspace 可能包含"用户拖了列但还没写 purpose"的不完整 unit。缓解：prompt 中对不完整 unit 标记为 `partial`，business_track 仅基于完整信息提取意图，不完整部分留给 planner 补全。
+
+---
+
+## D52 — FastAPI 作为 API 框架
+
+**Date**: 2026-07-05
+**Milestone**: M3
+
+**Decision**: 使用 FastAPI（而非 Flask、Django Ninja、Litestar）构建 DataInsight 的前端 API 层。
+
+**Rationale**:
+- 项目已有 Pydantic 模型（AgentState, Plan, DataProfile 等），FastAPI 原生集成 Pydantic v2，无需适配层
+- 原生 async 支持（`async def` endpoints, `BackgroundTasks`, SSE streaming via `StreamingResponse`）
+- 自动 OpenAPI 文档生成 → 前端开发可直接使用 Swagger UI 调试
+- Python 生态中最活跃的 API 框架，社区支持充足
+- 轻量——CLI 仍然是主要入口，API 层是附加能力，不需要 Django 的重量级
+
+**Alternatives considered**:
+- **Flask**: 无原生 async、无 Pydantic 集成、需手动构建 OpenAPI
+- **Django Ninja**: 过度依赖 Django ORM/ecosystem，对无数据库项目是额外负担
+- **Litestar**: 优秀但社区较小，成熟度和文档不如 FastAPI
+
+---
+
+## D53 — Session 模型：in-memory dict，一 tab 一 AgentState
+
+**Date**: 2026-07-05
+**Milestone**: M3
+
+**Decision**: 前端每个浏览器 tab 对应服务端一个 session（UUID 标识），服务端用 `dict[str, AgentState]` 存储。无鉴权、无持久化、无分布式。
+
+**Rationale**:
+- 单用户桌面应用（localhost:8000），不需要多用户隔离或 token 认证
+- AgentState 是纯 Pydantic 模型，内存占用极小（<50KB per session）
+- 无外部依赖——不需要 SQLite/Redis，部署复杂度为零
+- Session 生命周期：前端创建（POST /sessions）→ 操作 → 前端销毁（DELETE /sessions）
+- 可选的 1h TTL 自动清理防止泄漏
+
+**Future**: 多用户场景时，SessionStore 可替换为 Redis-backed 实现（相同接口，不同存储层）。
+
+---
+
+## D54 — 节点级 API，非图级 API
+
+**Date**: 2026-07-05
+**Milestone**: M3
+
+**Decision**: API 将每个 pipeline 节点暴露为独立 endpoint（`data_track_node`, `business_track_node`, `planner_node`, `preprocessing_node`, `analysis_node`, `report_gen_node`），前端负责编排调用顺序。Graph 保留给 CLI 的 `python -m src` 一次性调用。
+
+**Rationale**:
+- 前端交互模型是**节点级、可中断、人工在环**的，不是一次性全图运行：
+  - Data Pool 上传 → data_track（一次性，数据不变就不再跑）
+  - Workspace 编辑 → 纯前端 + 状态写入（不触发 LLM）
+  - Dialogue 消息 → business_track（每次对话触发）
+  - 生成计划按钮 → planner（用户主动触发）
+  - 执行按钮 → preprocessing + analysis（用户主动触发，可能跑 2+ 分钟）
+  - 生成报告 → report_gen（可选，用户主动触发）
+- `graph.invoke()` 的设计假设是"一路到底"，前端的每个动作只对应其中一两个节点
+- 前端负责编排而非后端，意味着前端可以自由组合节点——比如先 dialogue 几轮再一次性 plan + execute，或者跳过 dialogue 直接 workspace → execute
+- 保留 `POST /run` 作为便捷"一键分析"模式（内部调用 graph.invoke()）
+
+**Alternatives considered**:
+- **图级 API（暴露 graph.invoke 为单 endpoint）**: 回到 CLI 模式，前端只是传 file + requirement → 等结果。完全没有交互性。
+- **混合模式（graph + 部分节点）**: 增加概念复杂度——前端需要理解两套调用模型。纯节点级更一致。
+
+---
+
+## D55 — Execution 异步化：后台任务 + 轮询
+
+**Date**: 2026-07-05
+**Milestone**: M3
+
+**Decision**: `POST /execution/run` 立即返回 202，在后台运行 `preprocessing_node` + `analysis_node`。前端通过 `GET /execution/status` 轮询进度（1-2s 间隔）。
+
+**Rationale**:
+- preprocessing + analysis 是 subprocess.run 调用，耗时 2-5 分钟（取决于数据量和 LLM 生成的代码质量）
+- 同步阻塞 POST 会导致 HTTP 超时（浏览器默认 30s-120s）
+- 轮询是最简单的异步模式——前端 setInterval，后端返回 `{status, progress}` JSON
+- 轮询比 SSE/WebSocket 更容错——网络抖动时前端重试即可，不丢状态
+- `asyncio.to_thread()` 或 `run_in_executor()` 包装 `subprocess.run`，不阻塞 asyncio event loop
+
+**Alternatives considered**:
+- **SSE 进度推送**: 需要维护长连接，subprocess 进度难以拆成 token 级事件（stdout 是 bulk 的）
+- **WebSocket**: 对单次执行来说过重——不需要双向通信
+- **同步阻塞 POST**: 简单但不实用——2+ 分钟的 HTTP 请求不可靠
+
+---
+
+## D56 — Dialogue SSE 流式返回
+
+**Date**: 2026-07-05
+**Milestone**: M3
+
+**Decision**: `GET /dialogue/stream` 使用 SSE（Server-Sent Events）流式返回 business_track 的 LLM 输出。每个 token 作为一个 SSE event 推送，最终 event 包含完整的 parsed AnalysisIntent JSON。
+
+非流式 `POST /dialogue` 同时保留，用于不需要逐字显示的调用场景。
+
+**Rationale**:
+- business_track 的 LLM 调用通常在 1-3 秒内完成，但逐 token 流式返回给前端可以营造"AI 在思考"的即时体验
+- SSE 是 HTTP 原生协议（`text/event-stream`），浏览器 `EventSource` API 原生支持，无需额外库
+- 单向推送（server → client），正好匹配 LLM token stream 的场景
+- 非流式 POST 变体保留给程序化调用和测试
+
+**Implementation note**: dialogue route 直接调用 `get_llm(streaming=True)` 而非通过 `business_track_node`。Prompt 构建函数（`_build_intent_prompt`, `_build_contextualized_intent_prompt`）从 business_track 模块导入复用。
+
+**Alternatives considered**:
+- **WebSocket**: 双向通道对单向 token 流是 overkill
+- **仅非流式 POST**: 用户体验差——1-3 秒的空白等待
+
+---
+
+## D57 — `dashboard_pins` 作为唯一新增状态字段
+
+**Date**: 2026-07-05
+**Milestone**: M3
+
+**Decision**: 在 `AgentState` 中新增 `dashboard_pins: list[dict[str, Any]] = []` 字段，承载用户 pin 到看板的图表引用。这是 M3 对 state 模型的唯一变更。
+
+**Rationale**:
+- Dashboard 需要跨 session 持久化吗？不需要——pin 状态跟随 session 生命周期，session 销毁即丢弃
+- 存储在 `analysis_result` 内部（作为 nested dict key）会造成隐式依赖——其他节点可能覆盖 `analysis_result` 时丢失 pins
+- 独立字段语义清晰——"这是用户 pin 的图表，不属于 analysis 产出"
+- `list[dict[str, Any]]` 而非强类型 model：pin 结构简单（`pin_id, unit_id, chart_path, label, pinned_at`），定义完整 model 收益小；未来结构变化时弱类型更灵活
+- 默认 `[]` ——所有现有 AgentState 构造 100% 向后兼容
+
+**Pin 结构**（约定，非 model enforced）:
+```json
+{"pin_id": "uuid", "unit_id": 1, "chart_path": "out/chart1.png", "label": "Sales by Region", "pinned_at": "ISO8601"}
+```

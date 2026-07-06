@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent.nodes.business_track import _build_intent_prompt, business_track_node
+from src.agent.nodes.business_track import (
+    _build_contextualized_intent_prompt,
+    _build_intent_prompt,
+    business_track_node,
+)
 from src.agent.state import AgentState, AnalysisIntent
 
 
@@ -418,3 +422,217 @@ def test_suggestions_parse_malformed_entries(set_llm_env: None) -> None:
     assert "error" not in new_state
     suggestions = new_state["analysis_intent"].suggestions
     assert len(suggestions) == 2  # only the valid entries parsed
+
+
+# --- M2: Workspace-aware business_track tests ---
+
+
+@pytest.mark.unit
+def test_contextualized_intent_prompt_structure() -> None:
+    """Contextualized prompt should include workspace JSON and available columns."""
+    from src.agent.state import Plan, PlanUnit
+
+    workspace = Plan(
+        cleaning=PlanUnit(
+            unit_id=0, purpose="处理缺失值", cautious="注意0值",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1, purpose="按地区分析趋势", model="线性回归",
+                cautious="地区列有缺失", related_fields=["地区"],
+            )
+        ],
+        alignment_notes="用户草稿。",
+    )
+
+    prompt = _build_contextualized_intent_prompt(
+        user_requirement="把地区分析拆成华东和华南",
+        workspace_plan_json=workspace.model_dump_json(indent=2),
+        unified_columns=["销量", "地区", "日期"],
+    )
+
+    assert "WORKSPACE PLAN" in prompt
+    assert "按地区分析趋势" in prompt
+    assert "AVAILABLE COLUMNS" in prompt
+    assert "销量" in prompt
+    assert "把地区分析拆成华东和华南" in prompt
+    assert "REVISION context" in prompt
+
+
+@pytest.mark.unit
+def test_contextualized_intent_prompt_with_feedback() -> None:
+    """Contextualized prompt should include feedback section when provided."""
+    from src.agent.state import Plan, PlanUnit
+
+    workspace = Plan(
+        cleaning=PlanUnit(
+            unit_id=0, purpose="处理缺失值", cautious="注意0值",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1, purpose="按地区分析趋势", model="线性回归",
+                cautious="地区列有缺失", related_fields=["地区"],
+            )
+        ],
+        alignment_notes="用户草稿。",
+    )
+
+    prompt = _build_contextualized_intent_prompt(
+        user_requirement="Analyze sales",
+        workspace_plan_json=workspace.model_dump_json(indent=2),
+        unified_columns=["销量", "地区", "日期"],
+        feedback="The regional chart is wrong, use monthly data.",
+    )
+
+    assert "USER FEEDBACK" in prompt
+    assert "regional chart is wrong" in prompt
+    assert "PRIMARY signal" in prompt
+
+
+@pytest.mark.unit
+def test_business_track_node_with_workspace(set_llm_env: None) -> None:
+    """business_track should use contextualized prompt when workspace plan is present."""
+    _ = set_llm_env
+
+    from src.agent.state import Plan, PlanUnit
+
+    workspace = Plan(
+        cleaning=PlanUnit(
+            unit_id=0, purpose="处理缺失值", cautious="注意0值",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1, purpose="按地区分析趋势", model="线性回归",
+                cautious="地区列有缺失", related_fields=["地区"],
+            )
+        ],
+        alignment_notes="用户草稿。",
+    )
+
+    intent_json = json.dumps(
+        {
+            "core_question": "把地区分析拆成华东和华南",
+            "target_variable": None,
+            "analysis_type": "comparative",
+            "dimensions": ["region"],
+            "comparison_baseline": None,
+            "complexity": "moderate",
+            "suggestions": [
+                {
+                    "category": "dimension",
+                    "content": "对比华东和华南的销售表现",
+                    "rationale": "用户明确要求拆分地区",
+                }
+            ],
+        }
+    )
+
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = intent_json
+    mock_llm.invoke.return_value = mock_response
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="把地区分析拆成华东和华南",
+        unified_columns=["销量", "地区", "日期"],
+        plan=workspace,
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        new_state = business_track_node(state)
+
+    assert "error" not in new_state
+    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
+    assert new_state["analysis_intent"].analysis_type == "comparative"
+    assert new_state["feedback"] is None  # feedback consumed
+    mock_llm.invoke.assert_called_once()
+
+
+@pytest.mark.unit
+def test_business_track_node_without_workspace(set_llm_env: None) -> None:
+    """business_track should use pure translator when workspace is empty (backward compat)."""
+    _ = set_llm_env
+
+    intent_json = json.dumps(
+        {
+            "core_question": "Analyze Q2 revenue by product line",
+            "target_variable": "revenue",
+            "analysis_type": "diagnostic",
+            "dimensions": ["time period", "product category"],
+            "comparison_baseline": "Q1 same year",
+        }
+    )
+
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = intent_json
+    mock_llm.invoke.return_value = mock_response
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze Q2 revenue by product line",
+        unified_columns=["revenue", "product", "date"],
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        new_state = business_track_node(state)
+
+    assert "error" not in new_state
+    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
+    assert new_state["analysis_intent"].analysis_type == "diagnostic"
+
+
+@pytest.mark.unit
+def test_business_track_node_consumes_feedback(set_llm_env: None) -> None:
+    """business_track should consume feedback (set to None in return)."""
+    _ = set_llm_env
+
+    from src.agent.state import Plan, PlanUnit
+
+    workspace = Plan(
+        cleaning=PlanUnit(
+            unit_id=0, purpose="处理缺失值", cautious="注意0值",
+            related_fields=["销量"],
+        ),
+        units=[
+            PlanUnit(
+                unit_id=1, purpose="按地区分析趋势", model="线性回归",
+                cautious="地区列有缺失", related_fields=["地区"],
+            )
+        ],
+        alignment_notes="第一版计划。",
+    )
+
+    intent_json = json.dumps(
+        {
+            "core_question": "Use monthly data for regional analysis",
+            "target_variable": "sales",
+            "analysis_type": "trend",
+            "dimensions": ["time period", "region"],
+            "comparison_baseline": None,
+        }
+    )
+
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = intent_json
+    mock_llm.invoke.return_value = mock_response
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales",
+        unified_columns=["销量", "地区", "日期"],
+        plan=workspace,
+        feedback="The regional chart is wrong, use monthly data.",
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        new_state = business_track_node(state)
+
+    assert "error" not in new_state
+    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
+    assert new_state["feedback"] is None  # feedback consumed by business_track

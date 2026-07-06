@@ -91,7 +91,6 @@ class AgentState(BaseModel):
     data_profile: DataProfile | None = None
     cleaning_insights: str | None = None
     unified_columns: list[str] = []
-    draft_plan: Plan | None = None
     analysis_intent: AnalysisIntent | None = None
     plan: Plan | None = None
     preprocessing_result: dict[str, Any] | None = None
@@ -99,3 +98,4 @@ class AgentState(BaseModel):
     final_report: str | None = None
     error: str | None = None
     feedback: str | None = None
+    dashboard_pins: list[dict[str, Any]] = []

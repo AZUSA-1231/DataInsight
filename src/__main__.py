@@ -539,14 +539,6 @@ def main() -> None:
 
             state = _handle_plan_modification(state, command)
 
-        if state.feedback:
-            # Plan was modified — re-run planner_node with accumulated feedback
-            from src.agent.nodes.planner import planner_node
-
-            print("\n  Re-validating plan with modifications...")
-            planner_update = planner_node(state)
-            state = AgentState(**(state.model_dump() | planner_update))
-
     # ── Phase 2: Execute (preprocessing → analysis → report_gen) ──
     if state.plan and not state.error:
         print("\n  ── Executing plan ──\n")

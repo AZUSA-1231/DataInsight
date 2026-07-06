@@ -97,17 +97,96 @@ def _parse_suggestions(raw: list[dict[str, object]]) -> list[Suggestion]:
     return suggestions
 
 
+def _build_contextualized_intent_prompt(
+    user_requirement: str,
+    workspace_plan_json: str,
+    unified_columns: list[str],
+    feedback: str | None = None,
+) -> str:
+    columns_list = "\n".join(f"  - {c}" for c in unified_columns)
+    feedback_section = ""
+    if feedback:
+        feedback_section = f"""
+---
+
+**USER FEEDBACK (from previous report):**
+
+{feedback}
+"""
+    return f"""You are a precision business analyst. The user has an EXISTING workspace Plan
+and is providing additional dialogue (and optionally feedback). Your job is to
+produce a Contextualized AnalysisIntent that understands the dialogue RELATIVE
+to the workspace.
+
+WORKSPACE PLAN (JSON):
+{workspace_plan_json}
+
+AVAILABLE COLUMNS:
+{columns_list}
+{feedback_section}
+
+TASK:
+1. Analyze the user's dialogue against the workspace. Which unit(s) are they
+   referring to? What change are they requesting?
+2. If the user says "推倒重来/全部重做/重新开始", mark `reset_workspace: true`
+   in the Intent.
+3. If the user mentions specific column names, verify they exist in AVAILABLE
+   COLUMNS. If the workspace unit's related_fields don't include them, note this.
+4. Produce a structured AnalysisIntent where:
+   - `core_question`: the user's request contextualized against the workspace
+   - `suggestions`: grouped by unit_id, each suggesting what to change
+   - Other fields follow the standard Intent schema
+
+CRITICAL RULES:
+1. Output ONLY the JSON object. No markdown fences, no preamble.
+2. Understand that this is a REVISION context — the user is modifying existing work.
+3. If the user's dialogue is vague ("改进一下"), infer from the workspace what
+   could be improved and suggest specific changes.
+4. If feedback is provided, treat it as the PRIMARY signal — the user saw the
+   report and is telling you what's wrong.
+
+JSON schema:
+{_INTENT_SCHEMA}
+
+---
+
+USER'S DIALOGUE:
+
+{user_requirement}
+"""
+
+
 def business_track_node(state: AgentState) -> dict[str, object]:
-    """Stage 1 (parallel) — Business Track: extract structured AnalysisIntent
-    from the user's business question, with intelligent expansion, structuring,
-    and Planner-facing suggestions.
+    """Stage 1b — Business Track: extract structured AnalysisIntent.
 
-    Reads: state.user_requirement
+    Workspace-aware: when state.plan is present, the user's dialogue is
+    interpreted relative to the workspace (Contextualized Intent). When
+    workspace is empty, operates as a pure NL→Intent translator.
+
+    Reads: state.user_requirement, state.plan, state.unified_columns, state.feedback
     Writes: state.analysis_intent
+    Consumes: state.feedback
     """
-    logger.info("Business Track: parsing intent (%d chars)", len(state.user_requirement))
+    workspace_plan = state.plan
+    unified_columns = state.unified_columns
+    feedback = state.feedback
 
-    prompt = _build_intent_prompt(state.user_requirement)
+    if workspace_plan is not None and unified_columns:
+        logger.info(
+            "Business Track: workspace-aware intent (%d units, %d cols, feedback=%s)",
+            len(workspace_plan.units),
+            len(unified_columns),
+            bool(feedback),
+        )
+        prompt = _build_contextualized_intent_prompt(
+            state.user_requirement,
+            workspace_plan.model_dump_json(indent=2),
+            unified_columns,
+            feedback=feedback,
+        )
+    else:
+        logger.info("Business Track: pure translator mode (%d chars)", len(state.user_requirement))
+        prompt = _build_intent_prompt(state.user_requirement)
 
     try:
         llm = get_llm(temperature=0)
@@ -151,4 +230,4 @@ def business_track_node(state: AgentState) -> dict[str, object]:
         len(intent.dimensions),
         len(intent.suggestions),
     )
-    return {"analysis_intent": intent}
+    return {"analysis_intent": intent, "feedback": None}

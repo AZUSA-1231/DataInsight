@@ -131,11 +131,19 @@ We'll know we're right when: planner can validate that all `related_fields` in a
 4. **planner 简化**：移除三模式 if/elif/else。统一输入 `(workspace_plan, intent, data_profile, unified_columns)`。LLM 自行判断：workspace 空 → 生成；用户措辞轻微 → 微调；用户说推倒 → 重来。
 5. **feedback 流调整**：`_should_iterate` 路由到 `business_track`（而非 planner），feedback 作为额外对话输入重新解析意图。
 
-**M3 — Frontend Field Wiring (future)**
+**M3 — Frontend API Layer**
 
-- Web UI: field list + logic unit canvas
-- Drag-and-drop column-to-unit wiring
-- Real-time planner feedback via API
+The frontend requires a REST API that exposes each pipeline node as a callable endpoint, with session-scoped AgentState. This is NOT a thin wrapper around `graph.invoke()` — the frontend interaction model is fundamentally node-level (upload → workspace → dialogue → planner → execute → dashboard), not one-shot pipeline.
+
+1. **Session management**: `SessionStore` — in-memory dict mapping UUID → AgentState. Frontend creates session on page load, deletes on close.
+2. **Data Pool API**: `POST /data/upload` → save file → `data_track_node` → return `data_profile` + `unified_columns`. Data stable until re-upload.
+3. **Workspace API**: CRUD endpoints for Plan units. User manually constructs Plan — no LLM. `POST /plan/generate` triggers `planner_node` for AI review/completion.
+4. **Dialogue API**: `POST /dialogue` → `business_track_node` → `AnalysisIntent`. Workspace-aware when Plan exists. SSE streaming variant for real-time token display.
+5. **Execution API**: `POST /execution/run` starts async background task (preprocessing + analysis). `GET /execution/status` for polling. `GET /execution/charts/{name}` for PNG serving.
+6. **Dashboard API**: Thin persistence for pinned charts. `dashboard_pins` added to AgentState (only state change for M3).
+7. **Report API** (optional): `POST /report/generate` → `report_gen_node` → markdown.
+
+See [plans/cycle-3-m3-frontend-api.plan.md](../plans/cycle-3-m3-frontend-api.plan.md) for detailed design.
 
 **Out of scope for Cycle 3**
 
@@ -149,8 +157,8 @@ We'll know we're right when: planner can validate that all `related_fields` in a
 | # | Milestone | Outcome | Status | Plan |
 |---|---|---|---|---|
 | M1 | Table Unification + Planner Dual Mode | unified_columns as state contract, PlanUnit.related_fields, planner generate/review modes, graph conditional routing, data_track sans LLM | **done** | [plans/cycle-3-m1-table-unification.plan.md](../plans/cycle-3-m1-table-unification.plan.md) |
-| M2 | Workspace-Aware Architecture Refactor | `draft_plan` removed, business_track workspace-aware, planner unified path, graph linearized, feedback → business_track | planned | [plans/cycle-3-m2-workspace-awareness.plan.md](../plans/cycle-3-m2-workspace-awareness.plan.md) |
-| M3 | Frontend Field Wiring (future) | Web UI: field list + logic unit canvas, drag-and-drop column-to-unit wiring, real-time planner feedback via API | not started | — |
+| M2 | Workspace-Aware Architecture Refactor | `draft_plan` removed, business_track workspace-aware, planner unified path, graph linearized, feedback → business_track | **done** | [plans/cycle-3-m2-workspace-awareness.plan.md](../plans/cycle-3-m2-workspace-awareness.plan.md) |
+| M3 | Frontend API Layer | FastAPI REST API, session-scoped AgentState, node-level endpoints for Data Pool / Workspace / Dialogue / Execution / Dashboard / Report | **done** | [plans/cycle-3-m3-frontend-api.plan.md](../plans/cycle-3-m3-frontend-api.plan.md) |
 
 ## Open Questions
 
@@ -159,6 +167,9 @@ We'll know we're right when: planner can validate that all `related_fields` in a
 - [ ] In M2, business_track always runs (no skip). Does the extra 1-2s LLM call per invocation justify the always-available structured Intent? Current assessment: yes — the benefit of workspace-aware intent extraction outweighs the latency cost.
 - [ ] When business_track sees an incomplete workspace unit (purpose empty but related_fields populated), should it infer purpose from the linked columns? Current design: business_track flags it as `partial`, planner completes it.
 - [ ] For future M3: does data_track's LLM merge-logic belong in the same node, or should it be a separate `table_merger` node? Decision deferred to M3 planning.
+- [x] **M3 resolved**: data_track stays single-table for M3. Multi-table merge/join and SQL connector deferred to post-Cycle-3.
+- [x] **M3 resolved**: `POST /run` full-graph endpoint deferred to post-Cycle-3. Node-level endpoints sufficient for interactive frontend. Graph retained for CLI `python -m src`.
+- [x] **M3 resolved**: sandbox runs via `asyncio.create_task()` in background. Nodes call `subprocess.run` synchronously; acceptable for single-user local deployment. Future: wrap in `asyncio.to_thread()` for production.
 
 ## Risks
 
@@ -170,4 +181,4 @@ We'll know we're right when: planner can validate that all `related_fields` in a
 | business_track always runs (no skip) — 1 extra LLM call per invocation | High | Low | ~1-2s extra latency; acceptable for the benefit of always having structured Intent |
 
 ---
-*Status: M1 done. M2 planned at [plans/cycle-3-m2-workspace-awareness.plan.md](../plans/cycle-3-m2-workspace-awareness.plan.md).*
+*Status: M1+M2+M3 done. Cycle 3 complete.*
