@@ -78,7 +78,6 @@ def test_build_full_report_prompt_structure(
 
     assert "DataInsight 数据分析报告" in prompt
     assert "执行摘要" in prompt
-    assert "数据画像与清洗" in prompt
     assert "业务分析意图" in prompt
     assert "分析执行与结果" in prompt
     assert "数据与业务对齐备忘" in prompt
@@ -285,7 +284,7 @@ def test_full_report_prompt_has_per_unit_instructions() -> None:
         '{"status": "complete", "unit_results": []}',
         "question",
     )
-    assert "### 3." in prompt
+    assert "### 2." in prompt
     assert "ONE subsection" in prompt
     assert "per analysis unit" in prompt
 

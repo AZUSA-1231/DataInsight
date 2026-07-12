@@ -4,33 +4,43 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from src.agent.graph import (
     _should_iterate,
-    _should_retry_preprocessing,
     build_graph,
 )
 from src.agent.state import AgentState, AnalysisIntent
 
-_INTENT_JSON = json.dumps(
-    {
+
+def _bt_tool_call_msg(**overrides: object) -> AIMessage:
+    """Build a mock AIMessage with submit_planner_instruction tool call."""
+    args: dict[str, object] = {
         "core_question": "Test requirement",
-        "target_variable": None,
         "analysis_type": "diagnostic",
-        "dimensions": ["time period"],
-        "comparison_baseline": None,
+        "complexity": "moderate",
+        "target_columns": [],
+        "group_by": ["time period"],
+        "filter_hint": None,
+        "unit_suggestions": [],
+        "is_revision": False,
+        "target_unit_ids": [],
+        "revision_notes": None,
+        "suggestions": [],
+        "caution_notes": None,
+        "instruction_nl": "Test instruction for diagnostics.",
     }
-)
+    args.update(overrides)  # type: ignore[arg-type]
+    return AIMessage(
+        content="Test analysis explanation.",
+        tool_calls=[
+            {"name": "submit_planner_instruction", "args": args, "id": "call_test_001"}
+        ],
+    )
+
 
 _PLAN_JSON = json.dumps(
     {
-        "cleaning": {
-            "purpose": "处理缺失值",
-            "model": None,
-            "cautious": "0值可能是实际数据",
-            "depends_on": [],
-            "related_fields": ["销量"],
-        },
         "units": [
             {
                 "unit_id": 1,
@@ -61,11 +71,8 @@ def test_graph_node_names() -> None:
     assert "data_track" in node_names
     assert "business_track" in node_names
     assert "planner" in node_names
-    assert "preprocessing" in node_names
     assert "analysis" in node_names
     assert "report_gen" in node_names
-
-
 
 
 @pytest.mark.integration
@@ -75,13 +82,11 @@ def test_graph_data_track_integration(
     _ = set_llm_env
 
     mock_bt = MagicMock()
-    mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
+    mock_bt.bind_tools.return_value = mock_bt
+    mock_bt.invoke.return_value = _bt_tool_call_msg()
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(content=_PLAN_JSON)
-
-    mock_pre = MagicMock()
-    mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
 
     mock_an = MagicMock()
     mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
@@ -90,16 +95,6 @@ def test_graph_data_track_integration(
     mock_rg.invoke.return_value = MagicMock(content="# DataInsight Report\n\nMocked.")
 
     from src.sandbox.executor import SandboxResult
-
-    pre_sandbox_result = SandboxResult(
-        stdout=(
-            '{"cleaned_shape": {"rows": 5, "cols": 2}, "cleaning_actions": [],'
-            ' "cleaned_data_path": "/tmp/out/cleaned_data.csv"}'
-        ),
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
 
     an_sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 5, "cols": 2}}',
@@ -118,18 +113,14 @@ def test_graph_data_track_integration(
     with (
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
-        patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
-        patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
         patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         graph.invoke(state)
 
-    # data_track is now deterministic (no LLM), business_track still uses LLM
     mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
-    mock_an.invoke.assert_called_once()
 
 
 @pytest.mark.integration
@@ -143,14 +134,11 @@ def test_graph_m2_full_pipeline(
     from src.agent.nodes.planner import planner_node
 
     mock_bt = MagicMock()
-    mock_bt_response = MagicMock()
-    mock_bt_response.content = _INTENT_JSON
-    mock_bt.invoke.return_value = mock_bt_response
+    mock_bt.bind_tools.return_value = mock_bt
+    mock_bt.invoke.return_value = _bt_tool_call_msg()
 
     mock_dm = MagicMock()
-    mock_dm_response = MagicMock()
-    mock_dm_response.content = _PLAN_JSON
-    mock_dm.invoke.return_value = mock_dm_response
+    mock_dm.invoke.return_value = MagicMock(content=_PLAN_JSON)
 
     state = AgentState(
         file_path=sample_csv_path,
@@ -163,7 +151,7 @@ def test_graph_m2_full_pipeline(
     ):
         dt_update = data_track_node(state)
         state = AgentState(**(state.model_dump() | dt_update))
-        bt_update = business_track_node(state)
+        bt_update, _ = business_track_node(state)
         state = AgentState(**(state.model_dump() | bt_update))
         dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
@@ -187,36 +175,24 @@ def test_graph_m2_full_pipeline(
 def test_graph_m3_execution_integration(
     sample_csv_path: str, set_llm_env: None, temp_output_dir: str) -> None:
     """Full pipeline: data_track, business_track, planner,
-    preprocessing, analysis with mocked LLMs and sandbox."""
+    analysis with mocked LLMs and sandbox."""
     _ = set_llm_env
 
     from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
     from src.agent.nodes.planner import planner_node
-    from src.agent.nodes.preprocessing import preprocessing_node
     from src.sandbox.executor import SandboxResult
 
     mock_bt = MagicMock()
-    mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
+    mock_bt.bind_tools.return_value = mock_bt
+    mock_bt.invoke.return_value = _bt_tool_call_msg()
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(content=_PLAN_JSON)
 
-    mock_pre = MagicMock()
-    mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
-
     mock_an = MagicMock()
     mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
-
-    pre_sandbox_result = SandboxResult(
-        stdout='{"cleaned_shape": {"rows": 10, "cols": 3},'
-        ' "cleaning_actions": ["dropped nulls"],'
-        ' "cleaned_data_path": "/tmp/out/cleaned_data.csv"}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
 
     an_sandbox_result = SandboxResult(
         stdout='{"cleaned_shape": {"rows": 10, "cols": 3},'
@@ -237,19 +213,15 @@ def test_graph_m3_execution_integration(
     with (
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
-        patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
-        patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
         patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
     ):
         dt_update = data_track_node(state)
         state = AgentState(**(state.model_dump() | dt_update))
-        bt_update = business_track_node(state)
+        bt_update, _ = business_track_node(state)
         state = AgentState(**(state.model_dump() | bt_update))
         dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
-        pre_update = preprocessing_node(state)
-        state = AgentState(**(state.model_dump() | pre_update))
         an_update = analysis_node(state)
         state = AgentState(**(state.model_dump() | an_update))
 
@@ -257,8 +229,6 @@ def test_graph_m3_execution_integration(
     assert state.unified_columns is not None
     assert state.analysis_intent is not None
     assert state.plan is not None
-    assert state.preprocessing_result is not None
-    assert state.preprocessing_result["retry_count"] == 0
     assert state.analysis_result is not None
     assert state.error is None
 
@@ -273,59 +243,29 @@ def test_graph_m3_execution_integration(
     mock_an.invoke.assert_called_once()
 
 
-@pytest.mark.unit
-def test_graph_conditional_edges_preprocessing() -> None:
-    """Verify the preprocessing ReAct retry routing logic."""
-
-    # Success (no error) — go to analysis
-    state_ok = AgentState(file_path="", user_requirement="")
-    assert _should_retry_preprocessing(state_ok) == "analysis"
-
-    # Error + retry_count < 3 — retry preprocessing
-    state_retry = AgentState(
-        file_path="",
-        user_requirement="",
-        error="KeyError: 'region'",
-        preprocessing_result={"retry_count": 1},
-    )
-    assert _should_retry_preprocessing(state_retry) == "preprocessing"
-
-    # Error + retry_count >= 3 — give up, go to report_gen
-    state_give_up = AgentState(
-        file_path="",
-        user_requirement="",
-        error="failed again",
-        preprocessing_result={"retry_count": 3},
-    )
-    assert _should_retry_preprocessing(state_give_up) == "report_gen"
-
-
 @pytest.mark.integration
 def test_graph_m4_full_pipeline(
     sample_csv_path: str,
     set_llm_env: None,
     sample_analysis_result: dict,
 ) -> None:
-    """Full 6-node pipeline: data_track → business_track → planner →
-    preprocessing → analysis → report_gen."""
+    """Full 5-node pipeline: data_track → business_track → planner →
+    analysis → report_gen."""
     _ = set_llm_env
 
     from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
     from src.agent.nodes.planner import planner_node
-    from src.agent.nodes.preprocessing import preprocessing_node
     from src.agent.nodes.report_gen import report_gen_node
     from src.sandbox.executor import SandboxResult
 
     mock_bt = MagicMock()
-    mock_bt.invoke.return_value = MagicMock(content=_INTENT_JSON)
+    mock_bt.bind_tools.return_value = mock_bt
+    mock_bt.invoke.return_value = _bt_tool_call_msg()
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(content=_PLAN_JSON)
-
-    mock_pre = MagicMock()
-    mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
 
     mock_an = MagicMock()
     mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
@@ -333,16 +273,6 @@ def test_graph_m4_full_pipeline(
     mock_rg = MagicMock()
     mock_rg.invoke.return_value = MagicMock(
         content="# DataInsight 数据分析报告\n\nFull report with 数据与业务对齐备忘."
-    )
-
-    pre_sandbox_result = SandboxResult(
-        stdout=(
-            '{"cleaned_shape": {"rows": 10, "cols": 3}, "cleaning_actions": [],'
-            ' "cleaned_data_path": "/tmp/out/cleaned_data.csv"}'
-        ),
-        stderr="",
-        exit_code=0,
-        timed_out=False,
     )
 
     an_sandbox_result = SandboxResult(
@@ -360,20 +290,16 @@ def test_graph_m4_full_pipeline(
     with (
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
-        patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
-        patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
         patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         dt_update = data_track_node(state)
         state = AgentState(**(state.model_dump() | dt_update))
-        bt_update = business_track_node(state)
+        bt_update, _ = business_track_node(state)
         state = AgentState(**(state.model_dump() | bt_update))
         dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
-        pre_update = preprocessing_node(state)
-        state = AgentState(**(state.model_dump() | pre_update))
         an_update = analysis_node(state)
         state = AgentState(**(state.model_dump() | an_update))
         rg_update = report_gen_node(state)
@@ -395,23 +321,17 @@ def test_graph_feedback_iteration(
     sample_analysis_intent: object,
 ) -> None:
     """Feedback loop: user feedback → business_track (re-parses intent) →
-    planner → preprocessing → analysis → report_gen regenerates."""
+    planner → analysis → report_gen regenerates."""
     _ = set_llm_env
 
     from src.agent.nodes.analysis import analysis_node
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.planner import planner_node
-    from src.agent.nodes.preprocessing import preprocessing_node
     from src.agent.nodes.report_gen import report_gen_node
     from src.agent.state import Plan, PlanUnit
     from src.sandbox.executor import SandboxResult
 
-    # State with feedback and an existing plan (from a previous run)
     existing_plan = Plan(
-        cleaning=PlanUnit(
-            unit_id=0, purpose="处理缺失值", cautious="0值可能是实际数据",
-            related_fields=["销量"],
-        ),
         units=[
             PlanUnit(
                 unit_id=1, purpose="按区域分析销售趋势", model="线性回归",
@@ -431,29 +351,21 @@ def test_graph_feedback_iteration(
         feedback="The chart on regional sales is wrong, use monthly data instead.",
     )
 
-    # Mock business_track — consumes feedback, produces updated intent
     mock_bt = MagicMock()
-    mock_bt.invoke.return_value = MagicMock(content=json.dumps(
-        {
-            "core_question": "Analyze sales with monthly data",
-            "target_variable": "sales",
-            "analysis_type": "trend",
-            "dimensions": ["time period"],
-            "comparison_baseline": None,
-        }
-    ))
+    mock_bt.bind_tools.return_value = mock_bt
+    mock_bt.invoke.return_value = _bt_tool_call_msg(
+        core_question="Analyze sales with monthly data",
+        analysis_type="trend",
+        is_revision=True,
+        target_unit_ids=[1],
+        revision_notes="Changed from quarterly to monthly granularity",
+        instruction_nl="Revised: use monthly data for regional analysis.",
+    )
 
     mock_dm = MagicMock()
     mock_dm.invoke.return_value = MagicMock(
         content=json.dumps(
             {
-                "cleaning": {
-                    "purpose": "处理缺失值",
-                    "model": None,
-                    "cautious": "0值可能是实际数据",
-                    "depends_on": [],
-                    "related_fields": ["销量"],
-                },
                 "units": [
                     {
                         "unit_id": 1,
@@ -470,23 +382,12 @@ def test_graph_feedback_iteration(
         )
     )
 
-    mock_pre = MagicMock()
-    mock_pre.invoke.return_value = MagicMock(content="print('{}')\n")
-
     mock_an = MagicMock()
     mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
 
     mock_rg = MagicMock()
-    mock_rg.invoke.return_value = MagicMock(content="# DataInsight 数据分析报告\n\nRevised report.")
-
-    pre_sandbox_result = SandboxResult(
-        stdout=(
-            '{"cleaned_shape": {"rows": 10, "cols": 3}, "cleaning_actions": [],'
-            ' "cleaned_data_path": "/tmp/out/cleaned_data.csv"}'
-        ),
-        stderr="",
-        exit_code=0,
-        timed_out=False,
+    mock_rg.invoke.return_value = MagicMock(
+        content="# DataInsight 数据分析报告\n\nRevised report."
     )
 
     an_sandbox_result = SandboxResult(
@@ -499,18 +400,14 @@ def test_graph_feedback_iteration(
     with (
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
-        patch("src.agent.nodes.preprocessing.get_llm", return_value=mock_pre),
-        patch("src.agent.nodes.preprocessing.run_script", return_value=pre_sandbox_result),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
         patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
-        bt_update = business_track_node(state)
+        bt_update, _ = business_track_node(state)
         state = AgentState(**(state.model_dump() | bt_update))
         dm_update = planner_node(state)
         state = AgentState(**(state.model_dump() | dm_update))
-        pre_update = preprocessing_node(state)
-        state = AgentState(**(state.model_dump() | pre_update))
         an_update = analysis_node(state)
         state = AgentState(**(state.model_dump() | an_update))
         rg_update = report_gen_node(state)

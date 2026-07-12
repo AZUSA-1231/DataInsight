@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+
+class UnitType(str, Enum):
+    TRANSFORM = "transform"
+    FILTER = "filter"
+    TERMINAL = "terminal"
+
+
+class ExecutionMode(str, Enum):
+    TEMPLATE = "template"
+    LLM = "llm"
 
 
 class ColumnProfile(BaseModel):
@@ -41,7 +53,11 @@ class Suggestion(BaseModel):
 
 
 class AnalysisIntent(BaseModel):
-    """Structured analytical intent extracted from the user's business question."""
+    """DEPRECATED: Use PlannerInstruction instead.
+
+    Kept for backward compatibility with in-flight sessions and tests.
+    Planner node falls back to AnalysisIntent when PlannerInstruction is absent.
+    """
 
     core_question: str
     target_variable: str | None = None
@@ -55,26 +71,94 @@ class AnalysisIntent(BaseModel):
     caution_notes: str | None = None
 
 
-class PlanUnit(BaseModel):
-    """A single unit of work — cleaning or analysis — within a Plan."""
+class UnitSuggestion(BaseModel):
+    """A pre-structured analysis unit suggestion from Business Track.
 
-    unit_id: int
+    More concrete than the high-level Suggestion — specifies exact fields
+    and a recommended method, bridging business intent to technical plan.
+    """
+
     purpose: str
     model: str | None = None
-    cautious: str
-    depends_on: list[int] = []
     related_fields: list[str] = []
+    cautious: str = ""
+
+
+class PlannerInstruction(BaseModel):
+    """Highly structured instruction from Business Track to Planner.
+
+    This is the BT→Planner contract. BT has access to data columns and
+    business context, so it produces concrete field assignments rather
+    than vague business language. Planner's job is to validate, flesh out
+    missing details, and produce executable PlanUnits.
+    """
+
+    core_question: str
+    analysis_type: str  # descriptive | diagnostic | predictive | comparative | trend
+    complexity: str = "moderate"  # simple | moderate | complex
+
+    # Concrete column assignments (BT has access to unified_columns)
+    target_columns: list[str] = []
+    group_by: list[str] = []
+    filter_hint: str | None = None
+
+    # Pre-structured analysis units (may be empty — Planner fills gaps)
+    unit_suggestions: list[UnitSuggestion] = []
+
+    # Revision context (when workspace plan already exists)
+    is_revision: bool = False
+    target_unit_ids: list[int] = []
+    revision_notes: str | None = None
+
+    # General guidance
+    suggestions: list[Suggestion] = []
+    caution_notes: str | None = None
+
+    # Natural-language brief — the most important field
+    instruction_nl: str = ""
+
+
+class PlanUnit(BaseModel):
+    """A single unit of work within a Plan — Transform, Filter, or Terminal.
+
+    Each unit specifies its type (what it produces), execution mode
+    (template or LLM-generated code), DAG topology, and column contract.
+
+    The ``model`` key is accepted as a deprecated alias for ``model_hint``
+    during construction and validation.
+    """
+
+    unit_id: int
+    unit_type: UnitType = UnitType.TRANSFORM
+    execution_mode: ExecutionMode = ExecutionMode.LLM
+    purpose: str
+    model_hint: str | None = None
+    cautious: str = ""
+    depends_on: list[int] = []
+    input_from: str | None = None
+    input_columns: list[str] = []
+    output_columns: list[str] = []
+    related_fields: list[str] = []
+    template_name: str | None = None
+    template_params: dict[str, object] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_model_alias(cls, data: object) -> object:
+        """Accept ``model`` as an alias for ``model_hint``."""
+        if isinstance(data, dict) and "model" in data and "model_hint" not in data:
+            data = {**data, "model_hint": data["model"]}
+            del data["model"]
+        return data
 
 
 class Plan(BaseModel):
-    """Structured analysis orchestration plan (Cycle 2 M1).
+    """Structured analysis orchestration plan.
 
-    One fixed cleaning unit + N independent analysis units. Each unit specifies
-    its purpose, preferred model, and cautions. Units are star-shaped (no chain
-    dependencies) — depends_on reserved for future use.
+    N analysis units. Each unit specifies its purpose, preferred model,
+    cautions, related fields, and optional dependencies (DAG execution).
     """
 
-    cleaning: PlanUnit
     units: list[PlanUnit]
     alignment_notes: str
 
@@ -89,13 +173,13 @@ class AgentState(BaseModel):
     file_path: str
     user_requirement: str
     data_profile: DataProfile | None = None
-    cleaning_insights: str | None = None
     unified_columns: list[str] = []
     analysis_intent: AnalysisIntent | None = None
+    planner_instruction: PlannerInstruction | None = None
     plan: Plan | None = None
-    preprocessing_result: dict[str, Any] | None = None
     analysis_result: dict[str, Any] | None = None
     final_report: str | None = None
     error: str | None = None
     feedback: str | None = None
     dashboard_pins: list[dict[str, Any]] = []
+    dialogue_history: list[dict[str, str]] = []

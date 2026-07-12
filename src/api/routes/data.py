@@ -6,18 +6,20 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 
+from src.agent.input_guard import validate_upload_path
 from src.agent.nodes.data_track import data_track_node
 from src.api.schemas import DataUploadResponse
+from src.api.session import SessionStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions/{session_id}/data", tags=["data"])
 
-ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 UPLOAD_DIR = Path("data/uploads")
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 
-def _get_store(request: Request) -> Any:
+def _get_store(request: Request) -> SessionStore:
     return request.app.state.sessions
 
 
@@ -35,16 +37,22 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(422, "Filename is required")
 
-    ext = Path(file.filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        allowed = ",".join(sorted(ALLOWED_EXTENSIONS))
-        raise HTTPException(422, f"Unsupported file type: {ext}. Allowed: {allowed}")
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large. Max: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
 
     upload_dir = UPLOAD_DIR / session_id
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    file_path = upload_dir / file.filename
+    try:
+        file_path = validate_upload_path(upload_dir, file.filename)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+
     content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large. Max: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+
     file_path.write_bytes(content)
 
     store.update(

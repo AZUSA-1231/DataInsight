@@ -26,6 +26,56 @@ def sample_csv_path() -> str:
 
 
 @pytest.fixture
+def sample_csv_with_dates() -> str:
+    """Temp CSV with date/region/revenue/cost/volume columns for template testing."""
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "region", "revenue", "cost", "volume"])
+        writer.writerow(["2023-01-15", "East", "1000", "600", "100"])
+        writer.writerow(["2023-03-20", "West", "1500", "900", "150"])
+        writer.writerow(["2023-06-10", "East", "2000", "1200", "200"])
+        writer.writerow(["2024-01-05", "North", "800", "480", "80"])
+        writer.writerow(["2024-05-18", "South", "2200", "1320", "220"])
+        writer.writerow(["2024-09-30", "East", "1800", "1080", "180"])
+        writer.writerow(["2025-02-14", "West", "2500", "1500", "250"])
+        writer.writerow(["2025-07-01", "North", "1200", "720", "120"])
+    yield path
+    os.unlink(path)
+
+
+@pytest.fixture
+def sample_csv_100_rows() -> str:
+    """Temp CSV with 100+ rows for MVP integration test (deterministic, seed=42)."""
+    import random as _random
+
+    _random.seed(42)
+
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "region", "revenue", "cost", "volume"])
+
+        regions = ["East", "West", "North", "South"]
+        for i in range(120):
+            year = 2023 + (i % 3)
+            month = ((i * 3) % 12) + 1
+            day = ((i * 7) % 28) + 1
+            date = f"{year}-{month:02d}-{day:02d}"
+
+            region = regions[i % 4]
+            base_revenue = 800 + (i % 5) * 600 + _random.uniform(-100, 400)
+            revenue = int(max(500, base_revenue))
+            cost = int(revenue * (0.55 + _random.uniform(-0.08, 0.12)))
+            volume = int(revenue / 8 + _random.uniform(-10, 30))
+
+            writer.writerow([date, region, revenue, cost, volume])
+
+    yield path
+    os.unlink(path)
+
+
+@pytest.fixture
 def sample_xlsx_path() -> str:
     """Create a temporary XLSX file for testing Excel support."""
     import pandas as pd
@@ -50,7 +100,6 @@ def set_llm_env() -> None:
     os.environ["DATAINSIGHT_LLM_MODEL"] = "gpt-4o"
     os.environ["DATAINSIGHT_LLM_API_KEY"] = "sk-test-mock"
     os.environ["DATAINSIGHT_LLM_BASE_URL"] = "https://api.openai.com/v1"
-    os.environ["DATAINSIGHT_TIMEOUT_CLEANING"] = "60"
     os.environ["DATAINSIGHT_TIMEOUT_ANALYSIS"] = "30"
 
 
@@ -165,16 +214,10 @@ def sample_analysis_intent() -> object:
 
 @pytest.fixture
 def sample_plan() -> object:
-    """A minimal Plan (1 analysis unit) for preprocessing, analysis, and graph tests."""
+    """A minimal Plan (1 analysis unit) for analysis and graph tests."""
     from src.agent.state import Plan, PlanUnit
 
     return Plan(
-        cleaning=PlanUnit(
-            unit_id=0,
-            purpose="处理缺失值和异常值",
-            cautious="0值可能是实际销售数据而非缺失",
-            related_fields=[],
-        ),
         units=[
             PlanUnit(
                 unit_id=1,
@@ -194,12 +237,6 @@ def sample_plan_multi() -> object:
     from src.agent.state import Plan, PlanUnit
 
     return Plan(
-        cleaning=PlanUnit(
-            unit_id=0,
-            purpose="处理缺失值和异常值",
-            cautious="0值可能是实际销售数据",
-            related_fields=[],
-        ),
         units=[
             PlanUnit(
                 unit_id=1,
@@ -238,15 +275,6 @@ def make_plan() -> Callable[..., object]:
     from src.agent.state import Plan, PlanUnit
 
     def _make(**overrides: Any) -> Plan:
-        cleaning = overrides.get("cleaning")
-        if cleaning is None:
-            cleaning = PlanUnit(
-                unit_id=0,
-                purpose="处理缺失值和异常值",
-                cautious="0值可能是实际销售数据而非缺失",
-                related_fields=[],
-            )
-
         units = overrides.get("units")
         if units is None:
             units = [
@@ -264,7 +292,6 @@ def make_plan() -> Callable[..., object]:
             alignment_notes = "基于当前数据，本报告能够部分回答用户问题。"
 
         return Plan(
-            cleaning=cleaning,
             units=units,
             alignment_notes=alignment_notes,
         )
@@ -279,6 +306,86 @@ def temp_output_dir() -> str:
 
     with tempfile.TemporaryDirectory(prefix="datainsight_test_") as tmpdir:
         yield tmpdir
+
+
+@pytest.fixture
+def sample_planner_instruction() -> object:
+    """A minimal PlannerInstruction for BT Agent and Planner Agent tests."""
+    from src.agent.state import PlannerInstruction, Suggestion, UnitSuggestion
+
+    return PlannerInstruction(
+        core_question="Why did Q2 sales drop by 15%?",
+        analysis_type="diagnostic",
+        complexity="moderate",
+        target_columns=["sales"],
+        group_by=["region", "date"],
+        filter_hint=None,
+        unit_suggestions=[
+            UnitSuggestion(
+                purpose="按地区和季度分析销售趋势",
+                model="线性回归",
+                related_fields=["sales", "region", "date"],
+                cautious="region列有2%空值",
+            )
+        ],
+        is_revision=False,
+        target_unit_ids=[],
+        revision_notes=None,
+        suggestions=[
+            Suggestion(
+                category="dimension",
+                content="按时间维度分解以发现季节性模式",
+                rationale="15%下降可能是某个时间点集中发生的",
+            )
+        ],
+        caution_notes="相关性不等于因果关系",
+        instruction_nl=(
+            "用户想要诊断Q2销售下降15%的原因。数据包含sales、region、"
+            "date等列。我建议按地区和日期维度分解，同时检查不同产品类别的"
+            "表现差异。需要注意region列有少量空值，清洗时应处理。"
+        ),
+    )
+
+
+@pytest.fixture
+def bt_tool_call_msg() -> object:
+    """Build a mock AIMessage simulating a BT submit_planner_instruction tool call."""
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content="好的，我已经理解了您的需求。让我将分析指令提交给Planner。",
+        tool_calls=[
+            {
+                "name": "submit_planner_instruction",
+                "args": {
+                    "core_question": "Why did Q2 sales drop by 15%?",
+                    "analysis_type": "diagnostic",
+                    "complexity": "moderate",
+                    "target_columns": ["sales"],
+                    "group_by": ["region", "date"],
+                    "filter_hint": None,
+                    "unit_suggestions": [],
+                    "is_revision": False,
+                    "target_unit_ids": [],
+                    "revision_notes": None,
+                    "suggestions": [],
+                    "caution_notes": None,
+                    "instruction_nl": "用户需要诊断Q2销售下降15%的根因。按地区和日期分解趋势。",
+                },
+                "id": "call_test_001",
+            }
+        ],
+    )
+
+
+@pytest.fixture
+def bt_chat_msg() -> object:
+    """Build a mock AIMessage simulating a BT conversational response."""
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content="您想从哪个维度分析销售数据呢？是按地区、按时间趋势，还是按产品类别？"
+    )
 
 
 @pytest.fixture

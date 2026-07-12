@@ -6,8 +6,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from src.agent.nodes.planner import planner_node
-from src.agent.state import AgentState, Plan, PlanUnit
-from src.api.schemas import UnitCreateRequest, UnitUpdateRequest, WorkspacePlanResponse
+from src.agent.state import AgentState, Plan, PlannerInstruction, PlanUnit
+from src.api.schemas import (
+    GeneratePlanRequest,
+    UnitCreateRequest,
+    UnitUpdateRequest,
+    WorkspacePlanResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,33 +24,20 @@ def _get_store(request: Request) -> Any:
 
 
 def _reindex_units(units: list[PlanUnit]) -> list[PlanUnit]:
-    """Re-index units starting from 1, preserving order."""
+    """Re-index units starting from 1, preserving all fields."""
     reindexed: list[PlanUnit] = []
     for i, u in enumerate(units, start=1):
-        reindexed.append(
-            PlanUnit(
-                unit_id=i,
-                purpose=u.purpose,
-                model=u.model,
-                cautious=u.cautious,
-                depends_on=u.depends_on,
-                related_fields=u.related_fields,
-            )
-        )
+        data = u.model_dump()
+        data["unit_id"] = i
+        reindexed.append(PlanUnit(**data))
     return reindexed
 
 
 def _ensure_plan(state: AgentState) -> Plan:
-    """Return existing plan or create a default one with cleaning unit."""
+    """Return existing plan or create an empty default one."""
     if state.plan is not None:
         return state.plan
     return Plan(
-        cleaning=PlanUnit(
-            unit_id=0,
-            purpose="处理缺失值和异常值",
-            cautious="",
-            related_fields=[],
-        ),
         units=[],
         alignment_notes="",
     )
@@ -99,7 +91,7 @@ async def add_unit(
     new_unit = PlanUnit(
         unit_id=len(plan.units) + 1,
         purpose=body.purpose,
-        model=body.model,
+        model_hint=body.model,
         cautious=body.cautious,
         related_fields=body.related_fields,
     )
@@ -127,7 +119,7 @@ async def update_unit(
     if body.purpose is not None:
         update_data["purpose"] = body.purpose
     if body.model is not None:
-        update_data["model"] = body.model
+        update_data["model_hint"] = body.model
     if body.cautious is not None:
         update_data["cautious"] = body.cautious
     if body.related_fields is not None:
@@ -160,12 +152,30 @@ async def delete_unit(
 
 @router.post("/plan/generate", response_model=WorkspacePlanResponse)
 async def generate_plan(
-    session_id: str, request: Request
+    session_id: str, request: Request, body: GeneratePlanRequest | None = None
 ) -> WorkspacePlanResponse:
     store = _get_store(request)
     state = store.get(session_id)
     if state is None:
         raise HTTPException(404, "Session not found")
+
+    # If frontend sent a pending instruction, use it
+    if body and body.instruction:
+        try:
+            instruction = PlannerInstruction(**body.instruction)  # type: ignore[arg-type]
+            store.update(session_id, {"planner_instruction": instruction})
+            state = store.get(session_id)
+            assert state is not None
+        except Exception as e:
+            raise HTTPException(400, f"Invalid instruction: {e}") from e
+
+    if state.planner_instruction is None and state.analysis_intent is None:
+        raise HTTPException(
+            400,
+            "No instruction from Business Track yet. "
+            "Send a message via POST /dialogue first to let the BT Agent "
+            "understand your goal, then generate the plan.",
+        )
 
     result = planner_node(state)
     if "error" in result:

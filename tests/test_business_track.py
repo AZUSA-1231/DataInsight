@@ -1,638 +1,365 @@
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent.nodes.business_track import (
-    _build_contextualized_intent_prompt,
-    _build_intent_prompt,
-    business_track_node,
-)
-from src.agent.state import AgentState, AnalysisIntent
+from src.agent.nodes.business_track import business_track_node
+from src.agent.state import AgentState, AnalysisIntent, PlannerInstruction
+
+# ── BT Agent: conversational response tests ───────────────────────
 
 
 @pytest.mark.unit
-def test_build_intent_prompt_structure() -> None:
-    prompt = _build_intent_prompt("Analyze sales trend")
-
-    assert "core_question" in prompt
-    assert "target_variable" in prompt
-    assert "analysis_type" in prompt
-    assert "dimensions" in prompt
-    assert "comparison_baseline" in prompt
-    assert "Analyze sales trend" in prompt
-    assert "JSON" in prompt
-
-
-@pytest.mark.unit
-def test_build_intent_prompt_excludes_data_references() -> None:
-    prompt = _build_intent_prompt("Why did sales drop?")
-
-    assert "do not invent column names" in prompt.lower()
-    assert "no access to the data" in prompt.lower()
-    assert "only the json object" in prompt.lower()
-
-
-@pytest.mark.unit
-def test_business_track_node_success(set_llm_env: None) -> None:
-    _ = set_llm_env
-
-    intent_json = json.dumps(
-        {
-            "core_question": "Analyze Q2 revenue by product line",
-            "target_variable": "revenue",
-            "analysis_type": "diagnostic",
-            "dimensions": ["time period", "product category"],
-            "comparison_baseline": "Q1 same year",
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze Q2 revenue by product line",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "analysis_intent" in new_state
-    assert "error" not in new_state
-    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
-    assert new_state["analysis_intent"].analysis_type == "diagnostic"
-    mock_llm.invoke.assert_called_once()
-
-
-@pytest.mark.unit
-def test_business_track_node_preserves_state(set_llm_env: None) -> None:
-    _ = set_llm_env
-
-    intent_json = json.dumps(
-        {
-            "core_question": "Why did retention drop?",
-            "target_variable": None,
-            "analysis_type": "diagnostic",
-            "dimensions": [],
-            "comparison_baseline": None,
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Why did retention drop?",
-        cleaning_insights="Existing cleaning insights",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
-    assert new_state["analysis_intent"].core_question == "Why did retention drop?"
-
-
-@pytest.mark.unit
-def test_business_track_node_llm_error(set_llm_env: None) -> None:
+def test_bt_agent_conversational_response(set_llm_env: None, bt_chat_msg: object) -> None:
+    """BT Agent returns conversational text when LLM doesn't call a tool."""
     _ = set_llm_env
 
     mock_llm = MagicMock()
-    mock_llm.invoke.side_effect = RuntimeError("API timeout")
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Anything",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" in new_state
-    assert "API timeout" in new_state["error"]
-    assert "analysis_intent" not in new_state
-
-
-@pytest.mark.unit
-def test_business_track_node_invalid_json(set_llm_env: None) -> None:
-    _ = set_llm_env
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = "Not a JSON response — just some markdown text."
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze sales",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" in new_state
-    assert "JSON" in new_state["error"]
-    assert "analysis_intent" not in new_state
-
-
-@pytest.mark.unit
-def test_business_track_node_json_in_fence(set_llm_env: None) -> None:
-    """LLM may return JSON inside markdown code fences — should strip and parse."""
-    _ = set_llm_env
-
-    intent_json = json.dumps(
-        {
-            "core_question": "Analyze revenue",
-            "target_variable": "revenue",
-            "analysis_type": "trend",
-            "dimensions": ["time"],
-            "comparison_baseline": None,
-        }
-    )
-    fence_wrapped = f"```\n{intent_json}\n```"
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = fence_wrapped
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze revenue",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" not in new_state
-    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
-    assert new_state["analysis_intent"].analysis_type == "trend"
-
-
-# --- M3: Question Intelligence Tests ---
-
-
-@pytest.mark.unit
-def test_short_question_gets_expanded(set_llm_env: None) -> None:
-    """Short/vague questions should get expanded_question with plausible dimensions."""
-    _ = set_llm_env
-
-    intent_json = json.dumps(
-        {
-            "core_question": "分析销售数据",
-            "target_variable": None,
-            "analysis_type": "descriptive",
-            "dimensions": ["time period", "region", "product category"],
-            "comparison_baseline": None,
-            "complexity": "simple",
-            "expanded_question": "分析销售数据的时间趋势、地区分布和产品类别差异",
-            "suggestions": [
-                {
-                    "category": "dimension",
-                    "content": "按时间维度观察销售趋势",
-                    "rationale": "时间趋势是销售分析的基本维度",
-                },
-                {
-                    "category": "dimension",
-                    "content": "按地区细分销售表现",
-                    "rationale": "地理差异可能揭示区域性机会或问题",
-                },
-            ],
-            "caution_notes": "注意区分销售额与销售量；增长率需考虑基数效应",
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.return_value = bt_chat_msg
 
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="分析销售数据",
+        unified_columns=["sales", "region", "date"],
     )
 
     with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
+        result, meta = business_track_node(state)
 
-    assert "error" not in new_state
-    intent = new_state["analysis_intent"]
-    assert isinstance(intent, AnalysisIntent)
-    assert intent.complexity == "simple"
-    assert intent.expanded_question is not None
-    assert len(intent.expanded_question) > len("分析销售数据")
-    assert len(intent.suggestions) >= 2
-
-
-@pytest.mark.unit
-def test_complex_question_gets_structured(set_llm_env: None) -> None:
-    """Complex multi-part questions should produce more suggestions and higher complexity."""
-    _ = set_llm_env
-
-    intent_json = json.dumps(
-        {
-            "core_question": "为什么Q2销售额下降了15%？如果按地区看哪个区域最严重？",
-            "target_variable": "sales",
-            "analysis_type": "diagnostic",
-            "dimensions": ["time period", "region", "product category", "customer segment"],
-            "comparison_baseline": "Q1",
-            "complexity": "complex",
-            "expanded_question": None,
-            "suggestions": [
-                {
-                    "category": "dimension",
-                    "content": "按时间序列分解以定位下降发生的时间点",
-                    "rationale": "15%下降可能在特定周/月集中发生",
-                },
-                {
-                    "category": "dimension",
-                    "content": "按地区细分以识别最严重区域",
-                    "rationale": "用户明确询问了地区差异",
-                },
-                {
-                    "category": "method",
-                    "content": "使用贡献度分析量化各维度对下降的贡献",
-                    "rationale": "多维度同时变化，需分解各因素贡献",
-                },
-                {
-                    "category": "comparison",
-                    "content": "对比去年同期数据排除季节性影响",
-                    "rationale": "Q2可能本身是淡季",
-                },
-            ],
-            "caution_notes": "相关性不等于因果关系；外部因素可能未体现在数据中",
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="为什么Q2销售额下降了15%？如果按地区看哪个区域最严重？",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" not in new_state
-    intent = new_state["analysis_intent"]
-    assert isinstance(intent, AnalysisIntent)
-    assert intent.complexity == "complex"
-    assert intent.expanded_question is None  # already detailed
-    assert len(intent.suggestions) >= 3
-    assert len(intent.dimensions) >= 3
-
-
-@pytest.mark.unit
-def test_suggestions_have_required_fields(set_llm_env: None) -> None:
-    """Each Suggestion must have category, content, and rationale populated."""
-    _ = set_llm_env
-
-    intent_json = json.dumps(
-        {
-            "core_question": "Predict next quarter revenue",
-            "target_variable": "revenue",
-            "analysis_type": "predictive",
-            "dimensions": ["time period"],
-            "comparison_baseline": None,
-            "complexity": "moderate",
-            "expanded_question": None,
-            "suggestions": [
-                {
-                    "category": "method",
-                    "content": "使用时间序列预测模型",
-                    "rationale": "历史趋势是预测的基础",
-                },
-                {
-                    "category": "caution",
-                    "content": "注意数据时间跨度是否足够",
-                    "rationale": "少于2年的数据不适合做季度预测",
-                },
-            ],
-            "caution_notes": "预测假设历史模式延续；外部冲击不可预见",
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Predict next quarter revenue",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" not in new_state
-    suggestions = new_state["analysis_intent"].suggestions
-    assert len(suggestions) == 2
-    for s in suggestions:
-        assert s.category in ("dimension", "method", "comparison", "caution")
-        assert len(s.content) > 0
-        assert len(s.rationale) > 0
-
-
-@pytest.mark.unit
-def test_backward_compat_missing_m3_fields(set_llm_env: None) -> None:
-    """LLM response missing M3 fields should still parse with defaults."""
-    _ = set_llm_env
-
-    # Minimal valid JSON with only legacy fields
-    intent_json = json.dumps(
-        {
-            "core_question": "Analyze sales trend",
-            "target_variable": "sales",
-            "analysis_type": "trend",
-            "dimensions": ["time"],
-            "comparison_baseline": None,
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze sales trend",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" not in new_state
-    intent = new_state["analysis_intent"]
-    assert isinstance(intent, AnalysisIntent)
-    assert intent.complexity == "moderate"  # default
-    assert intent.expanded_question is None  # default
-    assert intent.suggestions == []  # default
-    assert intent.caution_notes is None  # default
-
-
-@pytest.mark.unit
-def test_suggestions_parse_malformed_entries(set_llm_env: None) -> None:
-    """Malformed suggestion entries should be silently skipped."""
-    _ = set_llm_env
-
-    intent_json = json.dumps(
-        {
-            "core_question": "Analyze churn",
-            "target_variable": None,
-            "analysis_type": "diagnostic",
-            "dimensions": [],
-            "comparison_baseline": None,
-            "complexity": "simple",
-            "suggestions": [
-                {"category": "method", "content": "有效建议", "rationale": "合理"},
-                {"bad_key": "missing required fields"},
-                {},
-                {"category": "dimension", "content": "另一个有效建议", "rationale": "合理2"},
-            ],
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze churn",
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" not in new_state
-    suggestions = new_state["analysis_intent"].suggestions
-    assert len(suggestions) == 2  # only the valid entries parsed
-
-
-# --- M2: Workspace-aware business_track tests ---
-
-
-@pytest.mark.unit
-def test_contextualized_intent_prompt_structure() -> None:
-    """Contextualized prompt should include workspace JSON and available columns."""
-    from src.agent.state import Plan, PlanUnit
-
-    workspace = Plan(
-        cleaning=PlanUnit(
-            unit_id=0, purpose="处理缺失值", cautious="注意0值",
-            related_fields=["销量"],
-        ),
-        units=[
-            PlanUnit(
-                unit_id=1, purpose="按地区分析趋势", model="线性回归",
-                cautious="地区列有缺失", related_fields=["地区"],
-            )
-        ],
-        alignment_notes="用户草稿。",
-    )
-
-    prompt = _build_contextualized_intent_prompt(
-        user_requirement="把地区分析拆成华东和华南",
-        workspace_plan_json=workspace.model_dump_json(indent=2),
-        unified_columns=["销量", "地区", "日期"],
-    )
-
-    assert "WORKSPACE PLAN" in prompt
-    assert "按地区分析趋势" in prompt
-    assert "AVAILABLE COLUMNS" in prompt
-    assert "销量" in prompt
-    assert "把地区分析拆成华东和华南" in prompt
-    assert "REVISION context" in prompt
-
-
-@pytest.mark.unit
-def test_contextualized_intent_prompt_with_feedback() -> None:
-    """Contextualized prompt should include feedback section when provided."""
-    from src.agent.state import Plan, PlanUnit
-
-    workspace = Plan(
-        cleaning=PlanUnit(
-            unit_id=0, purpose="处理缺失值", cautious="注意0值",
-            related_fields=["销量"],
-        ),
-        units=[
-            PlanUnit(
-                unit_id=1, purpose="按地区分析趋势", model="线性回归",
-                cautious="地区列有缺失", related_fields=["地区"],
-            )
-        ],
-        alignment_notes="用户草稿。",
-    )
-
-    prompt = _build_contextualized_intent_prompt(
-        user_requirement="Analyze sales",
-        workspace_plan_json=workspace.model_dump_json(indent=2),
-        unified_columns=["销量", "地区", "日期"],
-        feedback="The regional chart is wrong, use monthly data.",
-    )
-
-    assert "USER FEEDBACK" in prompt
-    assert "regional chart is wrong" in prompt
-    assert "PRIMARY signal" in prompt
-
-
-@pytest.mark.unit
-def test_business_track_node_with_workspace(set_llm_env: None) -> None:
-    """business_track should use contextualized prompt when workspace plan is present."""
-    _ = set_llm_env
-
-    from src.agent.state import Plan, PlanUnit
-
-    workspace = Plan(
-        cleaning=PlanUnit(
-            unit_id=0, purpose="处理缺失值", cautious="注意0值",
-            related_fields=["销量"],
-        ),
-        units=[
-            PlanUnit(
-                unit_id=1, purpose="按地区分析趋势", model="线性回归",
-                cautious="地区列有缺失", related_fields=["地区"],
-            )
-        ],
-        alignment_notes="用户草稿。",
-    )
-
-    intent_json = json.dumps(
-        {
-            "core_question": "把地区分析拆成华东和华南",
-            "target_variable": None,
-            "analysis_type": "comparative",
-            "dimensions": ["region"],
-            "comparison_baseline": None,
-            "complexity": "moderate",
-            "suggestions": [
-                {
-                    "category": "dimension",
-                    "content": "对比华东和华南的销售表现",
-                    "rationale": "用户明确要求拆分地区",
-                }
-            ],
-        }
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
-
-    state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="把地区分析拆成华东和华南",
-        unified_columns=["销量", "地区", "日期"],
-        plan=workspace,
-    )
-
-    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
-
-    assert "error" not in new_state
-    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
-    assert new_state["analysis_intent"].analysis_type == "comparative"
-    assert new_state["feedback"] is None  # feedback consumed
+    assert "error" not in result
+    assert meta["_bt_tool_called"] is False
+    assert "您想从哪个维度" in meta["_bt_response"]
+    assert result["planner_instruction"] is None
+    assert result["analysis_intent"] is None
+    mock_llm.bind_tools.assert_called_once()
     mock_llm.invoke.assert_called_once()
 
 
 @pytest.mark.unit
-def test_business_track_node_without_workspace(set_llm_env: None) -> None:
-    """business_track should use pure translator when workspace is empty (backward compat)."""
+def test_bt_agent_submits_instruction(
+    set_llm_env: None, bt_tool_call_msg: object
+) -> None:
+    """BT Agent calls submit_planner_instruction when ready."""
     _ = set_llm_env
 
-    intent_json = json.dumps(
-        {
-            "core_question": "Analyze Q2 revenue by product line",
-            "target_variable": "revenue",
-            "analysis_type": "diagnostic",
-            "dimensions": ["time period", "product category"],
-            "comparison_baseline": "Q1 same year",
-        }
-    )
-
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.return_value = bt_tool_call_msg
 
     state = AgentState(
         file_path="/tmp/test.csv",
-        user_requirement="Analyze Q2 revenue by product line",
-        unified_columns=["revenue", "product", "date"],
+        user_requirement="Why did Q2 sales drop by 15%?",
+        unified_columns=["sales", "region", "date"],
     )
 
     with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
+        result, meta = business_track_node(state)
 
-    assert "error" not in new_state
-    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
-    assert new_state["analysis_intent"].analysis_type == "diagnostic"
+    assert "error" not in result
+    assert meta["_bt_tool_called"] is True
+    assert isinstance(result["planner_instruction"], PlannerInstruction)
+    assert result["planner_instruction"].core_question == "Why did Q2 sales drop by 15%?"
+    assert result["planner_instruction"].analysis_type == "diagnostic"
+    assert result["planner_instruction"].target_columns == ["sales"]
+    assert result["planner_instruction"].group_by == ["region", "date"]
+    assert len(result["planner_instruction"].instruction_nl) > 0
+
+    # Backward-compat AnalysisIntent
+    assert isinstance(result["analysis_intent"], AnalysisIntent)
+    assert result["analysis_intent"].analysis_type == "diagnostic"
+
+    # feedback should be consumed
+    assert result["feedback"] is None
 
 
 @pytest.mark.unit
-def test_business_track_node_consumes_feedback(set_llm_env: None) -> None:
-    """business_track should consume feedback (set to None in return)."""
+def test_bt_agent_with_dialogue_history(
+    set_llm_env: None, bt_tool_call_msg: object
+) -> None:
+    """BT Agent receives dialogue history in its user context."""
+    _ = set_llm_env
+
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.return_value = bt_tool_call_msg
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="按地区拆分",
+        unified_columns=["sales", "region", "date"],
+        dialogue_history=[
+            {"role": "user", "content": "分析Q2销售趋势"},
+            {"role": "assistant", "content": "我将按地区和产品线分析Q2销售趋势..."},
+        ],
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        result, meta = business_track_node(state)
+
+    assert "error" not in result
+    assert meta["_bt_tool_called"] is True
+    # Verify history was injected into the prompt
+    call_args = mock_llm.invoke.call_args[0][0]
+    # Find the HumanMessage containing user context with history
+    history_found = False
+    for msg in call_args:
+        content = getattr(msg, "content", "")
+        if isinstance(content, str) and "Q2销售趋势" in content:
+            history_found = True
+            break
+    assert history_found
+
+
+@pytest.mark.unit
+def test_bt_agent_inspects_column(set_llm_env: None) -> None:
+    """BT Agent calls inspect_column, sees result, then calls submit_planner_instruction."""
+    _ = set_llm_env
+
+    from langchain_core.messages import AIMessage
+
+    # First call: inspect_column, second call: submit_planner_instruction
+    inspect_msg = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "inspect_column",
+                "args": {"column_name": "region"},
+                "id": "call_inspect_001",
+            }
+        ],
+    )
+    submit_msg = AIMessage(
+        content="I've checked the region column. Submitting now.",
+        tool_calls=[
+            {
+                "name": "submit_planner_instruction",
+                "args": {
+                    "core_question": "Analyze sales by region",
+                    "analysis_type": "descriptive",
+                    "complexity": "simple",
+                    "target_columns": ["sales"],
+                    "group_by": ["region"],
+                    "filter_hint": None,
+                    "unit_suggestions": [],
+                    "is_revision": False,
+                    "target_unit_ids": [],
+                    "revision_notes": None,
+                    "suggestions": [],
+                    "caution_notes": None,
+                    "instruction_nl": "Regional analysis of sales data.",
+                },
+                "id": "call_submit_002",
+            }
+        ],
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.side_effect = [inspect_msg, submit_msg]
+
+    from src.agent.state import ColumnProfile, DataProfile
+
+    data_profile = DataProfile(
+        file_path="/tmp/test.csv",
+        shape=(100, 3),
+        columns=[
+            ColumnProfile(
+                name="region", dtype="object", null_count=2, null_pct=2.0,
+                unique_count=4, unique_pct=4.0,
+            ),
+            ColumnProfile(
+                name="sales", dtype="float64", null_count=0, null_pct=0.0,
+                unique_count=50, unique_pct=50.0,
+            ),
+        ],
+        statistics={
+            "region": {"count": 98, "unique": 4, "top": "East", "freq": 30},
+        },
+        head_sample=[{"region": "East", "sales": 500.0}],
+    )
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Analyze sales by region",
+        unified_columns=["sales", "region"],
+        data_profile=data_profile,
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        result, meta = business_track_node(state)
+
+    assert "error" not in result
+    assert meta["_bt_tool_called"] is True
+    assert result["planner_instruction"].analysis_type == "descriptive"
+    assert result["planner_instruction"].group_by == ["region"]
+    assert mock_llm.invoke.call_count == 2
+
+
+@pytest.mark.unit
+def test_bt_agent_revision_scenario(
+    set_llm_env: None,
+) -> None:
+    """BT Agent with workspace + revision message → is_revision=True."""
     _ = set_llm_env
 
     from src.agent.state import Plan, PlanUnit
 
     workspace = Plan(
-        cleaning=PlanUnit(
-            unit_id=0, purpose="处理缺失值", cautious="注意0值",
-            related_fields=["销量"],
-        ),
         units=[
             PlanUnit(
                 unit_id=1, purpose="按地区分析趋势", model="线性回归",
-                cautious="地区列有缺失", related_fields=["地区"],
+                cautious="region列有缺失", related_fields=["region"],
             )
         ],
         alignment_notes="第一版计划。",
     )
 
-    intent_json = json.dumps(
-        {
-            "core_question": "Use monthly data for regional analysis",
-            "target_variable": "sales",
-            "analysis_type": "trend",
-            "dimensions": ["time period", "region"],
-            "comparison_baseline": None,
-        }
+    from langchain_core.messages import AIMessage
+
+    revision_msg = AIMessage(
+        content="我理解了，您想修改第1个分析单元。让我提交修订指令。",
+        tool_calls=[
+            {
+                "name": "submit_planner_instruction",
+                "args": {
+                    "core_question": "把地区分析拆成华东和华南",
+                    "analysis_type": "comparative",
+                    "complexity": "moderate",
+                    "target_columns": ["sales"],
+                    "group_by": ["region"],
+                    "filter_hint": None,
+                    "unit_suggestions": [],
+                    "is_revision": True,
+                    "target_unit_ids": [1],
+                    "revision_notes": "Split region analysis into East and South China",
+                    "suggestions": [],
+                    "caution_notes": None,
+                    "instruction_nl": "用户要求将地区分析拆分为华东和华南两个区域。",
+                },
+                "id": "call_revise_001",
+            }
+        ],
     )
 
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = intent_json
-    mock_llm.invoke.return_value = mock_response
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.return_value = revision_msg
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="把地区分析拆成华东和华南",
+        unified_columns=["sales", "region"],
+        plan=workspace,
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        result, meta = business_track_node(state)
+
+    assert "error" not in result
+    assert meta["_bt_tool_called"] is True
+    assert result["planner_instruction"].is_revision is True
+    assert result["planner_instruction"].target_unit_ids == [1]
+    assert result["planner_instruction"].revision_notes is not None
+
+
+@pytest.mark.unit
+def test_bt_agent_cli_mode_direct_tool_call(
+    set_llm_env: None, bt_tool_call_msg: object
+) -> None:
+    """CLI mode (no history, no plan, has message) → BT goes straight to tool call."""
+    _ = set_llm_env
+
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.return_value = bt_tool_call_msg
+
+    # CLI mode: no dialogue_history, no plan, has message
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Why did Q2 sales drop?",
+        unified_columns=["sales", "region", "date"],
+        # No dialogue_history, no plan → CLI mode
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        result, _ = business_track_node(state)
+
+    assert "error" not in result
+    # CLI mode prompt should contain indication
+    call_args = mock_llm.invoke.call_args[0][0]
+    cli_found = False
+    for msg in call_args:
+        content = getattr(msg, "content", "")
+        if isinstance(content, str) and "CLI" in content:
+            cli_found = True
+            break
+    assert cli_found
+
+
+@pytest.mark.unit
+def test_bt_agent_consumes_feedback(set_llm_env: None, bt_tool_call_msg: object) -> None:
+    """BT Agent consumes feedback (sets to None in return dict)."""
+    _ = set_llm_env
+
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.return_value = bt_tool_call_msg
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="Reanalyze with monthly data",
+        unified_columns=["sales", "region", "date"],
+        feedback="The chart was wrong, use monthly data instead.",
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        result, _ = business_track_node(state)
+
+    assert "error" not in result
+    assert result["feedback"] is None
+
+
+@pytest.mark.unit
+def test_bt_agent_llm_error(set_llm_env: None) -> None:
+    """BT Agent handles LLM errors gracefully."""
+    _ = set_llm_env
+
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.side_effect = RuntimeError("API timeout")
 
     state = AgentState(
         file_path="/tmp/test.csv",
         user_requirement="Analyze sales",
-        unified_columns=["销量", "地区", "日期"],
-        plan=workspace,
-        feedback="The regional chart is wrong, use monthly data.",
     )
 
     with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
-        new_state = business_track_node(state)
+        result, _ = business_track_node(state)
 
-    assert "error" not in new_state
-    assert isinstance(new_state["analysis_intent"], AnalysisIntent)
-    assert new_state["feedback"] is None  # feedback consumed by business_track
+    assert "error" in result
+    assert "API timeout" in result["error"]
+
+
+@pytest.mark.unit
+def test_bt_agent_no_columns(set_llm_env: None, bt_chat_msg: object) -> None:
+    """BT Agent handles scenario with no data uploaded."""
+    _ = set_llm_env
+
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_llm
+    mock_llm.invoke.return_value = bt_chat_msg
+
+    state = AgentState(
+        file_path="/tmp/test.csv",
+        user_requirement="分析销售",
+        # No unified_columns → no data
+    )
+
+    with patch("src.agent.nodes.business_track.get_llm", return_value=mock_llm):
+        result, meta = business_track_node(state)
+
+    assert "error" not in result
+    assert meta["_bt_tool_called"] is False
+    assert result["planner_instruction"] is None

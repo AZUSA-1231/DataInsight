@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import dashboard, data, dialogue, execution, report, workspace
 from src.api.schemas import SessionCreateRequest, SessionCreateResponse, SessionStateResponse
@@ -80,6 +81,9 @@ def create_app() -> FastAPI:
     app.include_router(execution.router)
     app.include_router(dashboard.router)
     app.include_router(report.router)
+
+    # Mount static frontend AFTER all API routes (order matters — otherwise static shadows API)
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
     return app
 

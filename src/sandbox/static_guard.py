@@ -69,7 +69,6 @@ _BANNED_IMPORTS: set[str] = {
     "aiohttp",
     # Process / execution
     "subprocess",
-    "os",
     "shutil",
     "pty",
     "signal",

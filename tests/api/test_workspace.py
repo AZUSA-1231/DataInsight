@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
+from src.agent.state import PlannerInstruction
+
 
 @pytest.mark.unit
 class TestWorkspaceRoutes:
@@ -78,7 +80,7 @@ class TestWorkspaceRoutes:
         assert resp.status_code == 200
         unit = resp.json()["plan"]["units"][0]
         assert unit["purpose"] == "修正后的分析目的"
-        assert unit["model"] == "线性回归"  # unchanged
+        assert unit["model_hint"] == "线性回归"  # unchanged
 
     def test_update_unit_not_found(self, api_client, test_session, sample_plan):
         api_client.put(
@@ -107,7 +109,6 @@ class TestWorkspaceRoutes:
         assert resp.status_code == 200
         plan = resp.json()["plan"]
         assert len(plan["units"]) == 2
-        # Unit IDs are re-indexed
         assert plan["units"][0]["unit_id"] == 1
         assert plan["units"][1]["unit_id"] == 2
 
@@ -122,16 +123,10 @@ class TestWorkspaceRoutes:
         assert len(plan["units"]) == 0
 
     def test_generate_plan(self, api_client, test_session, sample_plan):
-        """POST /plan/generate calls planner_node and returns result."""
+        """POST /plan/generate requires planner_instruction in state, calls planner_node."""
         from src.agent.state import Plan, PlanUnit
 
         updated_plan = Plan(
-            cleaning=PlanUnit(
-                unit_id=0,
-                purpose="处理缺失值",
-                cautious="",
-                related_fields=[],
-            ),
             units=[
                 PlanUnit(
                     unit_id=1,
@@ -144,10 +139,21 @@ class TestWorkspaceRoutes:
             alignment_notes="已根据数据特征调整分析计划。",
         )
 
-        api_client.put(
-            f"/api/sessions/{test_session}/workspace",
-            json=sample_plan.model_dump(),
+        # Set planner_instruction in session state
+        from src.api.session import SessionStore
+        store: SessionStore = api_client.app.state.sessions
+        store.update(
+            test_session,
+            {
+                "plan": sample_plan,
+                "planner_instruction": PlannerInstruction(
+                    core_question="分析销售数据",
+                    analysis_type="descriptive",
+                    instruction_nl="用户需要按地区分析销售趋势。",
+                ),
+            },
         )
+
         with patch(
             "src.api.routes.workspace.planner_node",
             return_value={"plan": updated_plan},
@@ -157,17 +163,19 @@ class TestWorkspaceRoutes:
         plan = resp.json()["plan"]
         assert plan["units"][0]["related_fields"] == ["销量", "地区"]
 
+    def test_generate_plan_without_instruction_returns_400(
+        self, api_client, test_session
+    ):
+        """generate_plan returns 400 when no planner_instruction or analysis_intent."""
+        resp = api_client.post(f"/api/sessions/{test_session}/plan/generate")
+        assert resp.status_code == 400
+        assert "No instruction" in resp.json()["detail"]
+
     def test_generate_plan_no_workspace(self, api_client, test_session):
-        """planner_node should handle empty workspace (generate fresh Plan)."""
+        """planner_node handles empty workspace (generate fresh Plan)."""
         from src.agent.state import Plan, PlanUnit
 
         new_plan = Plan(
-            cleaning=PlanUnit(
-                unit_id=0,
-                purpose="清洗数据",
-                cautious="",
-                related_fields=[],
-            ),
             units=[
                 PlanUnit(
                     unit_id=1,
@@ -179,6 +187,21 @@ class TestWorkspaceRoutes:
             ],
             alignment_notes="基于业务意图生成的分析计划。",
         )
+
+        # Set planner_instruction in session state
+        from src.api.session import SessionStore
+        store: SessionStore = api_client.app.state.sessions
+        store.update(
+            test_session,
+            {
+                "planner_instruction": PlannerInstruction(
+                    core_question="分析销售趋势",
+                    analysis_type="trend",
+                    instruction_nl="用户需要分析销售数据的趋势。",
+                ),
+            },
+        )
+
         with patch(
             "src.api.routes.workspace.planner_node",
             return_value={"plan": new_plan},

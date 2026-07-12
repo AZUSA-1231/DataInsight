@@ -7,6 +7,7 @@ import pytest
 from src.agent.nodes.analysis import (
     _build_unit_code_prompt,
     _build_unit_react_fix_prompt,
+    _build_upstream_context,
     _serialize_unit,
     analysis_node,
 )
@@ -21,6 +22,8 @@ def test_serialize_unit(sample_plan: object) -> None:
     assert "按区域分析销售趋势" in text
     assert "线性回归" in text
     assert "related_fields" in text
+    assert "input_columns" in text
+    assert "output_columns" in text
 
 
 @pytest.mark.unit
@@ -388,51 +391,6 @@ def test_analysis_node_timeout_handling(
 
 
 @pytest.mark.unit
-def test_analysis_node_uses_cleaned_data_path(
-    set_llm_env: None, temp_output_dir: str, sample_plan: object
-) -> None:
-    _ = set_llm_env
-
-    valid_script = (
-        'import sys; print(\'{"charts": [], "statistics": {}, "insights": ["from cleaned"]}\')'
-    )
-    sandbox_result = SandboxResult(
-        stdout='{"charts": [], "statistics": {}, "insights": ["from cleaned"]}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content=valid_script)
-
-    state = AgentState(
-        file_path="/tmp/original.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
-        preprocessing_result={
-            "retry_count": 0,
-            "attempts": [],
-            "parsed_output": {
-                "cleaned_shape": {"rows": 95, "cols": 3},
-                "cleaning_actions": ["dropped nulls"],
-                "cleaned_data_path": "/tmp/out/cleaned_data.csv",
-            },
-        },
-    )
-
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch("src.agent.nodes.analysis.run_script", return_value=sandbox_result) as mock_run,
-    ):
-        new_state = analysis_node(state)
-
-    assert new_state.get("error") is None
-    args, _ = mock_run.call_args
-    assert args[1][0] == "/tmp/out/cleaned_data.csv"
-
-
-@pytest.mark.unit
 def test_analysis_node_llm_error(set_llm_env: None, sample_plan: object) -> None:
     _ = set_llm_env
 
@@ -532,3 +490,189 @@ def test_analysis_unit_timeout_env_fallback(
     assert new_state.get("error") is None
     from src.sandbox.executor import DEFAULT_TIMEOUT
     assert mock_run.call_args[1]["timeout_seconds"] == DEFAULT_TIMEOUT
+
+
+# --- M3: Per-unit-type prompt tests ---
+
+
+@pytest.mark.unit
+def test_build_code_prompt_transform_has_row_invariant() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=1, purpose="add column", unit_type="transform",
+        model_hint="auto", cautious="", input_columns=["a", "b"],
+        output_columns=["c"], related_fields=["a", "b"],
+    )
+    prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out")
+    assert "UNIT TYPE: TRANSFORM" in prompt
+    assert "Row count MUST NOT change" in prompt
+    assert "output.csv" in prompt
+    assert "columns" in prompt.lower()
+
+
+@pytest.mark.unit
+def test_build_code_prompt_filter_has_column_invariant() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=1, purpose="filter by date", unit_type="filter",
+        model_hint="auto", cautious="", input_columns=["date"],
+        output_columns=[], related_fields=["date"],
+    )
+    prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out")
+    assert "UNIT TYPE: FILTER" in prompt
+    assert "Column set MUST NOT change" in prompt
+    assert "output.csv" in prompt
+    assert "row_count_before" in prompt
+
+
+@pytest.mark.unit
+def test_build_code_prompt_terminal_no_output_csv() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=1, purpose="scatter plot", unit_type="terminal",
+        model_hint="auto", cautious="", input_columns=["a", "b"],
+        output_columns=[], related_fields=["a", "b"],
+    )
+    prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out")
+    assert "UNIT TYPE: TERMINAL" in prompt
+    assert "Do NOT save output.csv" in prompt
+    assert "leaf node" in prompt
+
+
+@pytest.mark.unit
+def test_build_react_fix_prompt_has_type_rules() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=1, purpose="add column", unit_type="transform",
+        model_hint="auto", cautious="", input_columns=["a", "b"],
+        output_columns=["c"], related_fields=["a", "b"],
+    )
+    prompt = _build_unit_react_fix_prompt(
+        unit, "bad code", "some error", "/tmp/data.csv", "/tmp/out",
+    )
+    assert "UNIT TYPE: TRANSFORM" in prompt
+    assert "FIXED" in prompt
+    assert "bad code" in prompt
+    assert "some error" in prompt
+
+
+@pytest.mark.unit
+def test_type_specific_rules_all_types_covered() -> None:
+    """Every UnitType gets a non-empty rule section."""
+    from src.agent.nodes.analysis import _type_specific_rules
+    from src.agent.state import PlanUnit, UnitType
+
+    for ut in UnitType:
+        unit = PlanUnit(
+            unit_id=1, purpose="test", unit_type=ut,
+            model_hint="auto", cautious="",
+        )
+        rules = _type_specific_rules(unit)
+        assert len(rules) > 50, f"Rules for {ut} too short: {len(rules)} chars"
+        assert "UNIT TYPE:" in rules
+
+
+# --- M4: Prompt-layer coverage tests ---
+
+
+@pytest.mark.unit
+def test_build_upstream_context_with_columns() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=2,
+        purpose="聚类分析",
+        model="KMeans",
+        cautious="",
+        depends_on=[1],
+        input_columns=["sales_log", "region"],
+        output_columns=["Cluster"],
+        related_fields=[],
+    )
+    ctx = _build_upstream_context(unit)
+
+    assert ctx is not None
+    assert "Input columns available: sales_log, region" in ctx
+    assert "Expected output columns to produce: Cluster" in ctx
+    assert "depends on units [1]" in ctx
+
+
+@pytest.mark.unit
+def test_build_upstream_context_empty() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=1,
+        purpose="基础统计",
+        model="auto",
+        cautious="",
+        depends_on=[],
+        input_columns=[],
+        output_columns=[],
+        related_fields=[],
+    )
+    ctx = _build_upstream_context(unit)
+    assert ctx is None
+
+
+@pytest.mark.unit
+def test_build_unit_code_prompt_with_upstream() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=2,
+        purpose="聚类分析",
+        model="KMeans",
+        cautious="",
+        depends_on=[1],
+        input_columns=["sales_log"],
+        output_columns=["Cluster"],
+        related_fields=[],
+    )
+    upstream = "Input columns available: sales_log\nExpected output columns to produce: Cluster"
+    prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out", upstream_context=upstream)
+
+    assert "UPSTREAM DATA" in prompt
+    assert "sales_log" in prompt
+    assert "Cluster" in prompt
+    assert "already contains columns produced by previous" in prompt.lower()
+    assert "do NOT overwrite them" in prompt
+    # Rules 14 and 15
+    assert "output.csv" in prompt
+    assert "to_csv(index=False)" in prompt
+
+
+@pytest.mark.unit
+def test_build_unit_react_fix_prompt_with_upstream() -> None:
+    from src.agent.state import PlanUnit
+
+    unit = PlanUnit(
+        unit_id=3,
+        purpose="生成报告",
+        model="auto",
+        cautious="",
+        depends_on=[1, 2],
+        input_columns=["Cluster", "Score"],
+        output_columns=[],
+        related_fields=[],
+    )
+    upstream = "Input columns available: Cluster, Score\nThis unit depends on units [1, 2]."
+    prompt = _build_unit_react_fix_prompt(
+        unit,
+        "df.groupby('Cluster').mean()\n",
+        "KeyError: 'Cluster'",
+        "/tmp/data.csv",
+        "/tmp/out",
+        upstream_context=upstream,
+    )
+
+    assert "UPSTREAM DATA" in prompt
+    assert "Cluster" in prompt
+    assert "Score" in prompt
+    assert "already contains columns from previous" in prompt.lower()
+    assert "KeyError: 'Cluster'" in prompt  # error preserved
+    assert "df.groupby" in prompt  # failed code preserved

@@ -45,11 +45,12 @@ def test_banned_import_subprocess() -> None:
 
 
 @pytest.mark.unit
-def test_banned_import_from_os() -> None:
-    code = "from os import system\nsystem('rm -rf /')\n"
+def test_os_import_now_allowed() -> None:
+    """import os is allowed; dangerous calls (os.system, os.popen) caught by regex."""
+    code = "import os\nos.path.join('/tmp', 'data.csv')\n"
     safe, reason = check_static(code)
-    assert safe is False
-    assert "os" in reason
+    assert safe is True
+    assert reason == ""
 
 
 @pytest.mark.unit

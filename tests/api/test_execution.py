@@ -13,9 +13,9 @@ class TestExecutionRoutes:
         store: SessionStore = api_client.app.state.sessions
         store.update(test_session, {"plan": sample_plan})
 
-        mock_preprocess = {"preprocessing_result": {"status": "complete"}}
+        mock_analysis = {"analysis_result": {"status": "complete"}}
         with patch(
-            "src.api.routes.execution.preprocessing_node", return_value=mock_preprocess
+            "src.api.routes.execution.analysis_node", return_value=mock_analysis
         ):
             resp = api_client.post(f"/api/sessions/{test_session}/execution/run")
         assert resp.status_code == 200
@@ -31,7 +31,7 @@ class TestExecutionRoutes:
         store: SessionStore = api_client.app.state.sessions
         store.update(
             test_session,
-            {"plan": sample_plan, "preprocessing_result": {"status": "running"}},
+            {"plan": sample_plan, "analysis_result": {"status": "running"}},
         )
         resp = api_client.post(f"/api/sessions/{test_session}/execution/run")
         assert resp.status_code == 409
@@ -47,12 +47,12 @@ class TestExecutionRoutes:
         store: SessionStore = api_client.app.state.sessions
         store.update(
             test_session,
-            {"preprocessing_result": {"status": "running"}},
+            {"analysis_result": {"status": "running"}},
         )
         resp = api_client.get(f"/api/sessions/{test_session}/execution/status")
         assert resp.status_code == 200
         assert resp.json()["status"] == "running"
-        assert resp.json()["progress"] == "preprocessing"
+        assert resp.json()["progress"] == "analysis"
 
     def test_get_status_completed(self, api_client, test_session, sample_analysis_result):
         from src.api.session import SessionStore
@@ -60,10 +60,7 @@ class TestExecutionRoutes:
         store: SessionStore = api_client.app.state.sessions
         store.update(
             test_session,
-            {
-                "preprocessing_result": {"status": "complete"},
-                "analysis_result": sample_analysis_result,
-            },
+            {"analysis_result": sample_analysis_result},
         )
         resp = api_client.get(f"/api/sessions/{test_session}/execution/status")
         assert resp.status_code == 200
@@ -76,7 +73,7 @@ class TestExecutionRoutes:
         store.update(
             test_session,
             {
-                "preprocessing_result": {"status": "failed", "error": "Script timeout"},
+                "analysis_result": {"status": "failed", "error": "Script timeout"},
                 "error": "Script timeout",
             },
         )
@@ -91,10 +88,7 @@ class TestExecutionRoutes:
         store: SessionStore = api_client.app.state.sessions
         store.update(
             test_session,
-            {
-                "preprocessing_result": {"status": "complete"},
-                "analysis_result": sample_analysis_result,
-            },
+            {"analysis_result": sample_analysis_result},
         )
         resp = api_client.get(f"/api/sessions/{test_session}/execution/results")
         assert resp.status_code == 200
@@ -130,3 +124,122 @@ class TestExecutionRoutes:
             f"/api/sessions/{test_session}/execution/charts/missing.png"
         )
         assert resp.status_code == 404
+
+    # --- M4: unit rerun ---
+
+    def test_rerun_unit_success(self, api_client, test_session, sample_plan):
+        from src.api.session import SessionStore
+
+        store: SessionStore = api_client.app.state.sessions
+        store.update(
+            test_session,
+            {
+                "plan": sample_plan,
+                "analysis_result": {
+                    "status": "complete",
+                    "output_dir": "/tmp/rerun_test",
+                    "unit_results": [
+                        {"unit_id": 1, "status": "success", "charts": [],
+                         "insights": [], "stdout": "", "stderr": "", "error": None},
+                    ],
+                },
+            },
+        )
+
+        mock_result = {
+            "unit_id": 1,
+            "status": "success",
+            "parsed_output": {"charts": [], "statistics": {}, "insights": ["rerun ok"]},
+            "charts": [],
+            "insights": ["rerun ok"],
+            "statistics": {},
+            "error": None,
+            "retry_count": 0,
+            "scripts": [],
+            "stdout": "",
+            "output_dir": "/tmp/rerun_test/unit_1",
+        }
+
+        with patch(
+            "src.api.routes.execution._execute_unit", return_value=mock_result
+        ):
+            resp = api_client.post(
+                f"/api/sessions/{test_session}/execution/units/1/rerun"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["unit_id"] == 1
+        assert body["status"] == "success"
+
+    def test_rerun_unit_not_found(self, api_client, test_session, sample_plan):
+        from src.api.session import SessionStore
+
+        store: SessionStore = api_client.app.state.sessions
+        store.update(test_session, {"plan": sample_plan})
+
+        resp = api_client.post(
+            f"/api/sessions/{test_session}/execution/units/99/rerun"
+        )
+        assert resp.status_code == 404
+
+    def test_rerun_unit_no_plan(self, api_client, test_session):
+        resp = api_client.post(
+            f"/api/sessions/{test_session}/execution/units/1/rerun"
+        )
+        assert resp.status_code == 400
+
+    def test_rerun_unit_session_not_found(self, api_client):
+        resp = api_client.post(
+            "/api/sessions/DEADBEEF/execution/units/1/rerun"
+        )
+        assert resp.status_code == 404
+
+    def test_rerun_unit_marks_stale(self, api_client, test_session, sample_plan_multi):
+        from src.api.session import SessionStore
+
+        store: SessionStore = api_client.app.state.sessions
+        store.update(
+            test_session,
+            {
+                "plan": sample_plan_multi,
+                "analysis_result": {
+                    "status": "complete",
+                    "output_dir": "/tmp/rerun_test",
+                    "unit_results": [
+                        {"unit_id": 1, "status": "success", "charts": [],
+                         "insights": [], "stdout": "", "stderr": "", "error": None},
+                        {"unit_id": 2, "status": "success", "charts": [],
+                         "insights": [], "stdout": "", "stderr": "", "error": None},
+                        {"unit_id": 3, "status": "success", "charts": [],
+                         "insights": [], "stdout": "", "stderr": "", "error": None},
+                    ],
+                },
+            },
+        )
+
+        mock_result = {
+            "unit_id": 1,
+            "status": "success",
+            "parsed_output": {},
+            "charts": [],
+            "insights": [],
+            "statistics": {},
+            "error": None,
+            "retry_count": 0,
+            "scripts": [],
+            "stdout": "",
+            "output_dir": "/tmp/rerun_test/unit_1",
+        }
+
+        # sample_plan_multi has 3 independent units (no depends_on)
+        # So rerunning unit 1 should have no stale dependents
+        with patch(
+            "src.api.routes.execution._execute_unit", return_value=mock_result
+        ):
+            resp = api_client.post(
+                f"/api/sessions/{test_session}/execution/units/1/rerun"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        # stale_units should be empty since units are independent
+        assert body["stale_units"] == []

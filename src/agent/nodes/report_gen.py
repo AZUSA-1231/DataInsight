@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from typing import Any, cast
 
 from src.agent.llm import get_llm
@@ -12,10 +14,7 @@ logger = logging.getLogger(__name__)
 
 def _chart_basename(path: str) -> str:
     """Extract the filename from a chart path, stripping any unit_N_ prefix."""
-    import os as _os
-    import re
-
-    name = _os.path.basename(path)
+    name = os.path.basename(path)
     return re.sub(r"^unit\d+_", "", name)
 
 
@@ -68,7 +67,7 @@ CRITICAL RULES:
 3. Condense, don't copy-paste. The inputs can be long; summarize key points.
 4. The "数据与业务对齐备忘" section is MANDATORY.
 5. Be honest about limitations — do not exaggerate confidence.
-6. Section 3: write ONE subsection (### 3.{{N}}) per analysis unit. Each unit in
+6. Section 2: write ONE subsection (### 2.{{N}}) per analysis unit. Each unit in
    ANALYSIS RESULTS maps to exactly one subsection. Include findings, charts,
    key statistics, and any errors/warnings for that unit.
 7. For EACH chart listed in a unit's results, embed it using Markdown image
@@ -85,24 +84,18 @@ Report structure (use exactly these headings):
 3-5 sentence summary: what was analyzed, key findings, and the bottom-line answer
 to the user's question.
 
-## 1. 数据画像与清洗
-Summarize the Data Profile:
-- Dataset shape and key columns (from DATA PROFILE below)
-- Data quality (null rates, dtypes per column from DATA PROFILE)
-- Cleaning actions performed (from the Plan's cleaning unit)
-
-## 2. 业务分析意图
+## 1. 业务分析意图
 Summarize the Analysis Intent:
 - Core business question restated
 - Analysis type and target variable
 - Key dimensions and comparison baselines
 
-## 3. 分析执行与结果
+## 2. 分析执行与结果
 Start with a 1-2 sentence overall status (e.g. "全部 {{N}} 个分析单元执行成功" or
 "{{S}} of {{N}} 个分析单元执行成功，{{F}} 个失败").
 
 Then create ONE subsection per analysis unit from the ANALYSIS RESULTS:
-### 3.{{N}} {{{{该单元的分析目的（purpose）}}}}
+### 2.{{N}} {{{{该单元的分析目的（purpose）}}}}
 - **执行状态**: 成功 / 失败
 - **主要发现**: 2-4 key insights from this unit's results
 - **生成图表**: embed EACH chart using `![description](charts/filename.png)` with exact
@@ -110,7 +103,7 @@ Then create ONE subsection per analysis unit from the ANALYSIS RESULTS:
 - **关键统计**: notable statistics or metrics
 - **注意事项**: errors, warnings, or caveats if the unit had issues
 
-## 4. 数据与业务对齐备忘 ← MANDATORY
+## 3. 数据与业务对齐备忘 ← MANDATORY
 Context: {alignment_notes}
 
 - What the business wanted to know vs. what the data could actually answer
@@ -119,11 +112,11 @@ Context: {alignment_notes}
 - Assumptions made in the analysis
 - Honesty statement: "基于当前数据，本报告[能够/无法完全]回答用户问题，原因在于..."
 
-## 5. 图表清单
-List all charts that were embedded in Section 3 above, with one-line descriptions
+## 4. 图表清单
+List all charts that were embedded in Section 2 above, with one-line descriptions
 of what each shows. Use `- **filename.png**: description` format.
 
-## 6. 局限性与后续建议
+## 5. 局限性与后续建议
 - Limitations of the current analysis
 - What additional data would improve it
 - Suggested next steps for the user
@@ -164,8 +157,7 @@ def _build_partial_report_prompt(
 ) -> str:
     return f"""You are a senior data analysis report writer. The analysis pipeline
 encountered an ERROR during the execution phase. Generate a PARTIAL report with
-what we have — the data profile, cleaning insights, and business analysis are
-still valuable.
+what we have — the data profile and business analysis are still valuable.
 
 CRITICAL RULES:
 1. Write in Chinese. Clearly mark the report as **[部分报告 — 分析执行未完成]**.
@@ -182,31 +174,28 @@ Explain: the pipeline completed data profiling and business analysis successfull
 but the automated analysis phase failed. The report below contains all
 pre-execution findings.
 
-## 1. 数据画像与清洗
-(Summarize data quality from DATA PROFILE — shape, columns, null rates, dtypes)
-
-## 2. 业务分析意图
+## 1. 业务分析意图
 (Summarize analysis_intent)
 
-## 3. 分析执行计划 (未执行)
+## 2. 分析执行计划 (未执行)
 Context: {alignment_notes}
 
 The following analysis units were planned but not executed. List each unit
 with its purpose and planned method:
 {plan_units_json}
 
-## 4. 执行错误说明
+## 3. 执行错误说明
 Explain the error in accessible terms:
 - What went wrong during analysis execution
 - Whether this is a data issue or a system issue
-- What the user can try (rephrase requirement? clean data manually?)
+- What the user can try (rephrase requirement? re-upload data?)
 
 Error details: {error_message}
 
-## 5. 数据与业务对齐备忘 ← MANDATORY
+## 4. 数据与业务对齐备忘 ← MANDATORY
 (Based on data profile + business analysis — what we know even without execution)
 
-## 6. 后续建议
+## 5. 后续建议
 What the user can do next.
 
 ---
@@ -266,7 +255,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
         error_msg = error or "Analysis did not produce results."
         plan_units = state.plan.units if state.plan else []
         plan_units_json = json.dumps(
-            [{"unit_id": u.unit_id, "purpose": u.purpose, "model": u.model or "auto"}
+            [{"unit_id": u.unit_id, "purpose": u.purpose, "model": u.model_hint or "auto"}
              for u in plan_units],
             ensure_ascii=False,
             indent=2,

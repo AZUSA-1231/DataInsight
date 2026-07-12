@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel
 
-from src.agent.state import AnalysisIntent, Plan
+from src.agent.state import Plan
 
 
 # --- Session ---
@@ -67,14 +65,20 @@ class WorkspacePlanResponse(BaseModel):
     plan: Plan | None
 
 
+class GeneratePlanRequest(BaseModel):
+    instruction: dict[str, object] | None = None
+
+
 # --- Dialogue ---
 class DialogueRequest(BaseModel):
     message: str
 
 
 class DialogueResponse(BaseModel):
-    intent: AnalysisIntent
-    is_contextualized: bool
+    action: str  # "chat" | "confirm"
+    message: str  # BT's conversational text
+    instruction: dict[str, object] | None = None  # Present when action=confirm
+    is_contextualized: bool = False
 
 
 # --- Execution ---
@@ -92,11 +96,20 @@ class UnitResultResponse(BaseModel):
     charts: list[str]
     insights: list[str]
     error: str | None = None
+    stale: bool = False
 
 
 class ExecutionResultResponse(BaseModel):
-    preprocessing: dict[str, Any]
     units: list[UnitResultResponse]
+
+
+class RerunUnitResponse(BaseModel):
+    unit_id: int
+    status: str
+    stale_units: list[int] = []
+    charts: list[str] = []
+    insights: list[str] = []
+    error: str | None = None
 
 
 # --- Dashboard ---

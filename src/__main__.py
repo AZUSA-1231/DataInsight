@@ -18,48 +18,26 @@ from typing import Any
 from langgraph.graph.state import CompiledStateGraph
 
 from src.agent.graph import build_graph
+from src.agent.input_guard import ALLOWED_EXTENSIONS, sanitize_user_input
 from src.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
 
 _REQUIREMENT_MAX_LENGTH = 2000
 _FEEDBACK_MAX_LENGTH = 1000
-_ALLOWED_EXTENSIONS: set[str] = {".csv", ".xlsx", ".xls"}
 
 # Strip existing unit_N_ prefix from chart filenames to avoid double-prefixing
 _RE_UNIT_PREFIX = re.compile(r"^unit\d+_")
-
-# Prompt injection delimiters — stripped from user input
-_INJECTION_DELIMITERS = re.compile(
-    r"```|"
-    r"---|===|"
-    r"### SYSTEM|### USER|### ASSISTANT|"
-    r"<\|im_start\|>|<\|im_end\|>|"
-    r"<\|system\|>|<\|user\|>|<\|assistant\|>|"
-    r"\[INST\]|\[/INST\]|"
-    r"<<SYS>>|<</SYS>>",
-    re.IGNORECASE,
-)
-
-
-def _sanitize_user_input(text: str, max_len: int) -> str:
-    """Strip prompt injection delimiters, control characters, truncate."""
-    text = _INJECTION_DELIMITERS.sub(" ", text)
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > max_len:
-        text = text[:max_len]
-    return text
 
 
 def _validate_file_path(file_path: str) -> Path:
     """Resolve, validate extension, and reject path traversal."""
     path = Path(file_path).resolve()
     ext = path.suffix.lower()
-    if ext not in _ALLOWED_EXTENSIONS:
+    if ext not in ALLOWED_EXTENSIONS:
         print(
             f"[ERROR] Unsupported file type: {ext}. "
-            f"Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+            f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -298,8 +276,7 @@ _STAGE_LABELS: dict[str, str] = {
     "data_track": "Stage 1a — Data Profile",
     "business_track": "Stage 1b — Business Analysis",
     "planner": "Stage 2  — Plan Generation",
-    "preprocessing": "Stage 3a — Data Cleaning",
-    "analysis": "Stage 3b — Analysis Execution",
+    "analysis": "Stage 3  — Analysis Execution",
     "report_gen": "Stage 4  — Report Assembly",
 }
 
@@ -349,16 +326,10 @@ def _display_plan(plan: object) -> None:
     print("  ANALYSIS PLAN — Review before execution")
     print("=" * 72)
 
-    # Cleaning unit
-    c = plan.cleaning
-    print("\n  [Cleaning] (unit 0)")
-    print(f"    Purpose : {c.purpose}")
-    print(f"    Cautious: {c.cautious}")
-
     # Analysis units
     print(f"\n  [{len(plan.units)} Analysis Unit(s)]")
     for u in plan.units:
-        model_str = u.model or "(auto)"
+        model_str = u.model_hint or "(auto)"
         fields_str = ", ".join(u.related_fields) if u.related_fields else "(未指定)"
         print(f"    [{u.unit_id}] {u.purpose}")
         print(f"         Fields  : {fields_str}")
@@ -398,7 +369,7 @@ def _handle_plan_modification(state: AgentState, command: str) -> AgentState:
         new_unit = PlanUnit(
             unit_id=new_id,
             purpose=purpose,
-            model=model,
+            model_hint=model,
             cautious="用户手动添加",
         )
         plan.units.append(new_unit)
@@ -435,7 +406,7 @@ def _handle_plan_modification(state: AgentState, command: str) -> AgentState:
                 if field == "purpose":
                     u.purpose = new_value
                 elif field == "model":
-                    u.model = new_value if new_value else None
+                    u.model_hint = new_value if new_value else None
                 elif field == "cautious":
                     u.cautious = new_value
                 else:
@@ -506,18 +477,18 @@ def main() -> None:
 
     state = AgentState(
         file_path=args.file_path,
-        user_requirement=_sanitize_user_input(args.requirement, _REQUIREMENT_MAX_LENGTH),
+        user_requirement=sanitize_user_input(args.requirement, _REQUIREMENT_MAX_LENGTH),
     )
 
     print(f"\nDataInsight analyzing: {args.file_path}")
     print(f"Requirement: {args.requirement}")
     print("Running 4-stage pipeline...\n")
 
-    # ── Phase 1: Plan (data_track → business_track → planner, pause before preprocessing) ──
+    # ── Phase 1: Plan (data_track → business_track → planner, pause before analysis) ──
     thread_config: dict[str, Any] = {"configurable": {"thread_id": "main"}}
     try:
         state = _run_graph(
-            state, graph, config={**thread_config, "interrupt_before": ["preprocessing"]}
+            state, graph, config={**thread_config, "interrupt_before": ["analysis"]}
         )
     except Exception as e:
         print(f"\n[FATAL] Pipeline failed during planning: {e}", file=sys.stderr)
@@ -539,7 +510,7 @@ def main() -> None:
 
             state = _handle_plan_modification(state, command)
 
-    # ── Phase 2: Execute (preprocessing → analysis → report_gen) ──
+    # ── Phase 2: Execute (analysis → report_gen) ──
     if state.plan and not state.error:
         print("\n  ── Executing plan ──\n")
         try:
@@ -583,7 +554,7 @@ def main() -> None:
             break
 
         print("Revising analysis based on feedback...\n")
-        sanitized = _sanitize_user_input(feedback, _FEEDBACK_MAX_LENGTH)
+        sanitized = sanitize_user_input(feedback, _FEEDBACK_MAX_LENGTH)
         state = state.model_copy(update={"feedback": sanitized})
 
         try:
