@@ -5,10 +5,11 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from src.agent.nodes.analysis import analysis_node
-from src.agent.state import AgentState
+from src.agent.state import AgentState, PlanUnit
 
 
 @pytest.mark.integration
@@ -43,7 +44,15 @@ def test_smoke_analysis_real_sandbox(
         state = AgentState(
             file_path=csv_path,
             user_requirement="Smoke test",
-            plan=make_plan(),
+            plan=make_plan(
+                units=[
+                    PlanUnit(
+                        unit_id=1,
+                        purpose="Smoke test terminal",
+                        unit_type="terminal",
+                    )
+                ]
+            ),
         )
 
         with patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm):
@@ -66,8 +75,7 @@ def test_smoke_analysis_real_sandbox(
 def test_smoke_dag_chain_real_sandbox(
     set_llm_env: None, temp_output_dir: str
 ) -> None:
-    """3-unit DAG chain with real subprocess: validates topological ordering,
-    output.csv passing, and column resolution end-to-end."""
+    """3-unit in-process DAG validates function contracts and checkpoints."""
     _ = set_llm_env
 
     from src.agent.state import Plan, PlanUnit
@@ -85,44 +93,22 @@ def test_smoke_dag_chain_real_sandbox(
     try:
         # Unit 1: compute score_squared from score
         script_u1 = (
-            "import sys, os, pandas as pd, json\n"
-            "df = pd.read_csv(sys.argv[1])\n"
-            "df['score_squared'] = df['score'] ** 2\n"
-            "out_dir = sys.argv[2]\n"
-            "df.to_csv(os.path.join(out_dir, 'output.csv'), index=False)\n"
-            "print(json.dumps({"
-            "'charts': [], "
-            "'statistics': {'mean_sq': df['score_squared'].mean()}, "
-            "'insights': ['computed score_squared']"
-            "}))\n"
+            "def _unit(df, input_columns, params):\n"
+            "    values = df['score'] ** 2\n"
+            "    return {'columns': {'score_squared': values}, 'artifacts': []}\n"
         )
 
         # Unit 2: read upstream data (has score_squared), compute category
         script_u2 = (
-            "import sys, os, pandas as pd, json\n"
-            "df = pd.read_csv(sys.argv[1])\n"
-            "df['score_category'] = df['score'].apply("
-            "lambda x: 'high' if x > 90 else 'low')\n"
-            "out_dir = sys.argv[2]\n"
-            "df.to_csv(os.path.join(out_dir, 'output.csv'), index=False)\n"
-            "print(json.dumps({"
-            "'charts': [], "
-            "'statistics': {'high': int((df['score_category'] == 'high').sum())}, "
-            "'insights': ['computed score_category']"
-            "}))\n"
+            "def _unit(df, input_columns, params):\n"
+            "    values = df['score'].gt(90).map({True: 'high', False: 'low'})\n"
+            "    return {'columns': {'score_category': values}, 'artifacts': []}\n"
         )
 
         # Unit 3: read upstream data (has score_category), final stats
         script_u3 = (
-            "import sys, os, pandas as pd, json\n"
-            "df = pd.read_csv(sys.argv[1])\n"
-            "out_dir = sys.argv[2]\n"
-            "df.to_csv(os.path.join(out_dir, 'output.csv'), index=False)\n"
-            "print(json.dumps({"
-            "'charts': [], "
-            "'statistics': {'rows': len(df)}, "
-            "'insights': ['final analysis']"
-            "}))\n"
+            "def _unit(df, input_columns, params):\n"
+            "    return {'columns': {}, 'artifacts': []}\n"
         )
 
         mock_llm = MagicMock()
@@ -192,9 +178,13 @@ def test_smoke_dag_chain_real_sandbox(
                 f"Unit {uid} failed: {unit_results[uid].get('error')}"
             )
 
-        # Verify unit 3 had access to upstream columns (score_squared, score_category)
-        ur3 = unit_results[3]
-        assert ur3["statistics"]["rows"] == 5  # all 5 rows passed through
+        # Verify the final checkpoint contains both upstream columns.
+        checkpoint = os.path.join(
+            an_result["output_dir"], "checkpoints", "wide_l3.parquet"
+        )
+        final_df = pd.read_parquet(checkpoint)
+        assert final_df["score_squared"].tolist() == [9025, 7569, 8464, 6084, 7744]
+        assert final_df["score_category"].tolist() == ["high", "low", "high", "low", "low"]
 
         # Verify call order: exactly 3 LLM invocations (no retries)
         assert mock_llm.invoke.call_count == 3

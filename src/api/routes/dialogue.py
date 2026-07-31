@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from src.agent.input_guard import sanitize_user_input
 from src.agent.llm import get_llm
 from src.agent.nodes.business_track import business_track_node
+from src.agent.state import PlannerInstruction
 from src.api.schemas import DialogueRequest, DialogueResponse
 from src.api.session import SessionStore
 
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/api/sessions/{session_id}/dialogue", tags=["dialogue
 
 
 def _get_store(request: Request) -> SessionStore:
-    return request.app.state.sessions
+    return cast(SessionStore, request.app.state.sessions)
 
 
 @router.post("", response_model=DialogueResponse)
@@ -65,7 +66,7 @@ async def send_message(
     tool_called = bool(bt_meta.get("_bt_tool_called", False))
     instruction = result.get("planner_instruction")
 
-    if tool_called and instruction is not None:
+    if tool_called and isinstance(instruction, PlannerInstruction):
         inst_dict: dict[str, object] = instruction.model_dump()
         return DialogueResponse(
             action="confirm",
@@ -158,7 +159,7 @@ async def stream_intent(
         store.update(session_id, state_update)
 
     explanation: str = str(bt_meta.get("_bt_response", ""))
-    instruction: Any = bt_result.get("planner_instruction")  # noqa: ANN401
+    instruction = bt_result.get("planner_instruction")
     tool_called: bool = bool(bt_meta.get("_bt_tool_called", False))
     bt_error: str | None = str(bt_result["error"]) if "error" in bt_result else None
 
@@ -192,7 +193,7 @@ async def stream_intent(
                 await asyncio.sleep(0.01)
 
             # Emit tool_call event if BT called a tool
-            if tool_called and instruction is not None:
+            if tool_called and isinstance(instruction, PlannerInstruction):
                 inst_dict: dict[str, object] = instruction.model_dump()
                 tc_data = json.dumps({
                     "name": "submit_planner_instruction",
@@ -203,7 +204,7 @@ async def stream_intent(
             # Emit done event
             action = "confirm" if tool_called else "chat"
             done_data: dict[str, object] = {"action": action, "full_text": full.strip()}
-            if tool_called and instruction is not None:
+            if tool_called and isinstance(instruction, PlannerInstruction):
                 done_data["instruction"] = instruction.model_dump()
             yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 

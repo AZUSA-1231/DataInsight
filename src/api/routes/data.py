@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 
@@ -20,7 +20,7 @@ MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 
 def _get_store(request: Request) -> SessionStore:
-    return request.app.state.sessions
+    return cast(SessionStore, request.app.state.sessions)
 
 
 @router.post("/upload", response_model=DataUploadResponse)
@@ -87,7 +87,7 @@ async def get_profile(session_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(404, "Session not found")
     if state.data_profile is None:
         raise HTTPException(404, "No data uploaded yet")
-    return state.data_profile.model_dump()  # type: ignore[no-any-return]
+    return state.data_profile.model_dump()
 
 
 @router.get("/columns")

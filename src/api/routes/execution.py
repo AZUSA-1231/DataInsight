@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -26,7 +26,27 @@ OUTPUT_DIR = Path("data/output")
 
 
 def _get_store(request: Request) -> SessionStore:
-    return request.app.state.sessions
+    return cast(SessionStore, request.app.state.sessions)
+
+
+def _chart_reference(session_id: str, chart: object) -> str | None:
+    """Convert a stored chart path to a session-relative API reference."""
+    if not isinstance(chart, str) or not chart:
+        return None
+    allowed_base = (OUTPUT_DIR / session_id).resolve()
+    candidate = Path(chart)
+    resolved = candidate.resolve()
+    try:
+        return resolved.relative_to(allowed_base).as_posix()
+    except ValueError:
+        logger.warning("Ignoring chart outside session output: %s", chart)
+        return None
+
+
+def _chart_references(session_id: str, charts: object) -> list[str]:
+    if not isinstance(charts, list):
+        return []
+    return [ref for chart in charts if (ref := _chart_reference(session_id, chart))]
 
 
 async def _run_execution(session_id: str, store: SessionStore) -> None:
@@ -35,7 +55,7 @@ async def _run_execution(session_id: str, store: SessionStore) -> None:
     if state is None:
         return
 
-    store.update(session_id, {"error": None})
+    state = store.update(session_id, {"error": None})
 
     try:
         result = analysis_node(state)
@@ -59,9 +79,18 @@ async def run_execution(session_id: str, request: Request) -> dict[str, str]:
     if ana_result and ana_result.get("status") == "running":
         raise HTTPException(409, "Execution already in progress")
 
+    output_dir = OUTPUT_DIR / session_id / "analysis"
+    output_dir.mkdir(parents=True, exist_ok=True)
     store.update(
         session_id,
-        {"analysis_result": {"status": "running"}, "error": None},
+        {
+            "analysis_result": {
+                "status": "running",
+                "output_dir": str(output_dir),
+                "unit_results": [],
+            },
+            "error": None,
+        },
     )
 
     asyncio.create_task(_run_execution(session_id, store))
@@ -108,7 +137,7 @@ async def get_results(
             status=u.get("status", "unknown"),
             stdout=u.get("stdout", ""),
             stderr=u.get("stderr", ""),
-            charts=u.get("charts", []),
+            charts=_chart_references(session_id, u.get("charts", [])),
             insights=u.get("insights", []),
             error=u.get("error"),
             stale=u.get("stale", False),
@@ -211,7 +240,7 @@ async def rerun_unit(
         unit_id=unit_id,
         status=result.get("status", "unknown"),
         stale_units=stale_ids,
-        charts=result.get("charts", []),
+        charts=_chart_references(session_id, result.get("charts", [])),
         insights=result.get("insights", []),
         error=result.get("error"),
     )
@@ -241,7 +270,7 @@ def _mark_stale(
     ]
 
 
-@router.get("/charts/{chart_name}")
+@router.get("/charts/{chart_name:path}")
 async def serve_chart(
     session_id: str, chart_name: str, request: Request
 ) -> FileResponse:
@@ -256,8 +285,10 @@ async def serve_chart(
     resolved = chart_path.resolve()
 
     allowed_base = Path(output_dir).resolve()
-    if not str(resolved).startswith(str(allowed_base)):
-        raise HTTPException(403, "Path traversal blocked")
+    try:
+        resolved.relative_to(allowed_base)
+    except ValueError:
+        raise HTTPException(403, "Path traversal blocked") from None
 
     if not resolved.exists():
         raise HTTPException(404, f"Chart {chart_name} not found")

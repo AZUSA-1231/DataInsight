@@ -68,7 +68,7 @@ def _common_sandbox_rules() -> str:
 
 
 def _type_specific_rules(unit: PlanUnit) -> str:
-    """Return type-specific rules and JSON contract for the unit."""
+    """Return the in-process function contract for a Transform or Filter."""
     if unit.unit_type == UnitType.TRANSFORM:
         return """
 **UNIT TYPE: TRANSFORM** — You are adding NEW columns to the DataFrame.
@@ -78,14 +78,13 @@ T1. Row count MUST NOT change. Every row in = every row out. Use .transform()
     or direct column operations, NEVER .agg() or .groupby().agg().
 T2. Do NOT modify existing columns — only ADD new ones declared in output_columns.
 T3. Read ONLY from input_columns and related_fields.
-T4. Save the FULL DataFrame (original columns + new columns) to
-    `os.path.join(output_dir, 'output.csv')` using `df.to_csv(index=False)`.
+T4. Every returned Series MUST preserve df.index exactly.
 
-STDOUT JSON (LAST line, one line only):
-{"charts": ["output_dir/chart1.png", ...],
- "statistics": {"key": "value", ...},
- "insights": ["insight1", "insight2", ...],
- "columns": ["new_col_1", "new_col_2", ...]}"""
+RETURN VALUE:
+{"columns": {"new_col_1": pandas_series, ...},
+ "artifacts": [],
+ "statistics": {"optional_metric": value},
+ "insights": ["optional concise finding"]}"""
 
     if unit.unit_type == UnitType.FILTER:
         return """
@@ -95,16 +94,25 @@ TYPE-SPECIFIC RULES:
 F1. Column set MUST NOT change. Every input column must appear in output.
 F2. Each row must still represent its original sample — no aggregation, no joins.
 F3. Read ONLY from input_columns and related_fields.
-F4. Save the FILTERED DataFrame to `os.path.join(output_dir, 'output.csv')`
-    using `df.to_csv(index=False)`.
-F5. Report row counts in the statistics so the caller knows filter selectivity.
+F4. Preserve the original row index; return only a subset of input rows.
+F5. snapshot_name must contain only letters, digits, underscores, or hyphens.
 
-STDOUT JSON (LAST line, one line only):
-{"charts": [],
- "statistics": {"row_count_before": N, "row_count_after": M, ...},
- "insights": ["insight1", ...]}"""
+RETURN VALUE:
+{"filtered_df": filtered_dataframe,
+ "snapshot_name": "descriptive_name",
+ "artifacts": [],
+ "statistics": {"row_count_before": N, "row_count_after": M},
+ "insights": ["optional concise finding"]}"""
 
-    # UnitType.TERMINAL (default)
+    # Terminal units never use the in-process path.
+    return """
+**UNIT TYPE: TERMINAL** — You are producing ARTIFACTS (charts, reports, etc.).
+
+Terminal units execute in the subprocess path, not as in-process functions."""
+
+
+def _terminal_sandbox_rules() -> str:
+    """Return the subprocess contract used only by Terminal units."""
     return """
 **UNIT TYPE: TERMINAL** — You are producing ARTIFACTS (charts, reports, etc.).
 
@@ -137,7 +145,7 @@ def _build_unit_code_prompt(
 The input file for this unit already contains columns produced by previous
 analysis steps. Use these columns as needed but do NOT overwrite them.
 """
-    type_section = _type_specific_rules(unit)
+    type_section = _terminal_sandbox_rules()
 
     return f"""You are a senior data analyst. Write a COMPLETE, runnable Python script
 that executes the SINGLE analysis task described below. Focus ONLY on this one task.
@@ -191,7 +199,7 @@ def _build_unit_react_fix_prompt(
 The input file already contains columns from previous analysis steps.
 Use them as needed but do NOT overwrite them.
 """
-    type_section = _type_specific_rules(unit)
+    type_section = _terminal_sandbox_rules()
 
     return f"""You are a debugging specialist. The Python analysis script below FAILED.
 Diagnose the root cause and produce a FIXED, complete Python script.
@@ -286,17 +294,208 @@ def _load_input_data(data_path: str) -> pd.DataFrame:
     return pd.read_csv(data_path)
 
 
+def _model_name(llm: object, node: str) -> str:
+    """Return the concrete configured LLM name for persisted result metadata."""
+    for attribute in ("model_name", "model"):
+        value = getattr(llm, attribute, None)
+        if isinstance(value, str) and value:
+            return value
+    suffix = node.upper()
+    return (
+        os.environ.get(f"DATAINSIGHT_LLM_MODEL_{suffix}")
+        or os.environ.get("DATAINSIGHT_LLM_MODEL")
+        or "unknown"
+    )
+
+
+# ── in-process LLM execution (Transform / Filter) ────────────────────────────
+
+
+def _build_inprocess_prompt(
+    unit: PlanUnit,
+    retry_context: dict[str, str] | None = None,
+) -> str:
+    """Prompt for generating a single ``_unit`` function body (no script boilerplate).
+
+    The LLM must define ``def _unit(df, input_columns, params):`` returning
+    the per-unit-type dict contract.  The framework handles data loading,
+    checkpoint saving, and contract validation.
+    """
+    unit_text = _serialize_unit(unit)
+    type_rules = _type_specific_rules(unit)
+    prefix = "FIX " if retry_context else ""
+
+    retry_section = ""
+    if retry_context:
+        retry_section = f"""
+**PREVIOUS ATTEMPT (FAILED):**
+
+```python
+{retry_context['code']}
+```
+
+**ERROR:** {retry_context['error']}
+
+Fix the error and produce a corrected ``_unit`` function.
+"""
+
+    label = f"{prefix}{unit.unit_type.value.upper()}"
+    return f"""Write a Python function body for a {label} analysis unit.
+
+DEFINE THIS FUNCTION:
+```python
+def _unit(df, input_columns, params):
+    # df: pd.DataFrame — the input wide table
+    # input_columns: list[str] — columns this unit reads
+    # params: dict — extra parameters from template_params
+    ...
+    return ...  # see contract below
+```
+
+RULES:
+- Use ONLY pandas (as ``pd``) and numpy (as ``np``). No other imports.
+- No file I/O, no network, no subprocess, no print() to stdout.
+- Return a dict matching the contract below. Do NOT write output.csv.
+- Keep the function body short and focused — typically 5-20 lines.
+
+{type_rules}
+{retry_section}
+---
+
+**UNIT CONTEXT (JSON):**
+
+{unit_text}
+"""
+
+
+def _execute_inprocess_llm(
+    unit: PlanUnit,
+    data_path: str,
+    output_dir: str,
+    retry_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute a Transform or Filter unit via in-process LLM code generation.
+
+    LLM → exec_llm_function → call fn → _build_template_result.
+    ReAct retry (max 3) re-invokes the LLM with error context.
+    """
+    from src.agent.templates import _build_template_result, exec_llm_function
+
+    unit_id = unit.unit_id
+    retry_count = retry_state.get("retry_count", 0) if retry_state else 0
+    attempts: list[dict[str, str]] = retry_state.get("attempts", []) if retry_state else []
+    df = _load_input_data(data_path)
+    model_used = "unknown"
+
+    while retry_count < _MAX_RETRIES:
+        retry_ctx: dict[str, str] | None = None
+        if attempts:
+            last = attempts[-1]
+            retry_ctx = {"code": last["code"], "error": last["error"]}
+
+        prompt = _build_inprocess_prompt(unit, retry_context=retry_ctx)
+
+        try:
+            llm = get_llm(temperature=0, node="analysis_transform")
+            model_used = _model_name(llm, "analysis_transform")
+            response = llm.invoke(prompt)
+            raw = response.content if hasattr(response, "content") else str(response)
+            code = str(raw) if not isinstance(raw, str) else raw
+        except Exception as e:
+            logger.error("In-process unit [%d]: LLM call failed: %s", unit_id, e)
+            retry_count += 1
+            attempts.append({"code": "", "error": f"LLM error: {e}"})
+            if retry_count >= _MAX_RETRIES:
+                break
+            continue
+
+        code = _extract_code_block(code)
+        logger.info(
+            "In-process unit [%d]: generated code (%d chars, attempt %d)",
+            unit_id, len(code), retry_count + 1,
+        )
+
+        # Compile and run
+        try:
+            fn = exec_llm_function(code)
+        except ValueError as e:
+            logger.error("In-process unit [%d]: compile failed: %s", unit_id, e)
+            retry_count += 1
+            attempts.append({"code": code, "error": str(e)})
+            if retry_count >= _MAX_RETRIES:
+                break
+            continue
+
+        try:
+            template_output = fn(df, unit.input_columns, unit.template_params or {})
+        except Exception as e:
+            logger.error(
+                "In-process unit [%d]: function raised: %s", unit_id, e,
+            )
+            retry_count += 1
+            attempts.append({"code": code, "error": str(e)})
+            if retry_count >= _MAX_RETRIES:
+                break
+            continue
+
+        if not isinstance(template_output, dict):
+            retry_count += 1
+            msg = f"Expected dict return, got {type(template_output).__name__}"
+            attempts.append({"code": code, "error": msg})
+            if retry_count >= _MAX_RETRIES:
+                break
+            continue
+
+        # Success — build and validate through the same path as templates
+        try:
+            result = _build_template_result(unit, template_output, output_dir, df)
+        except ValueError as e:
+            logger.error("In-process unit [%d]: contract failed: %s", unit_id, e)
+            retry_count += 1
+            attempts.append({"code": code, "error": str(e)})
+            if retry_count >= _MAX_RETRIES:
+                break
+            continue
+        result["source_code"] = code
+        result["model_used"] = model_used
+        result["retry_count"] = retry_count
+        result["scripts"] = []
+        result["stdout"] = ""
+        logger.info("In-process unit [%d]: SUCCESS (attempt %d)", unit_id, retry_count + 1)
+        return result
+
+    # Exhausted retries
+    return {
+        "unit_id": unit_id,
+        "status": "failed",
+        "parsed_output": None,
+        "charts": [],
+        "insights": [],
+        "statistics": {},
+        "error": (
+            f"Unit {unit_id} failed after {_MAX_RETRIES} retries: "
+            f"{attempts[-1]['error'][:300] if attempts else 'unknown'}"
+        ),
+        "retry_count": retry_count,
+        "scripts": [],
+        "stdout": "",
+        "output_dir": output_dir,
+        "source_code": attempts[-1]["code"] if attempts else None,
+        "model_used": model_used,
+    }
+
+
 def _execute_unit(
     unit: PlanUnit,
     data_path: str,
     parent_output_dir: str,
     unit_retry_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute a single PlanUnit: template dispatch or LLM gen -> sandbox -> ReAct.
+    """Execute a unit through template, in-process LLM, or terminal sandbox.
 
     Template-mode units run in-process via _template_dispatch and return
-    immediately. LLM-mode units go through the existing code-gen/sandbox/ReAct
-    path.
+    immediately. Transform/Filter LLM units compile a restricted temporary
+    function. Terminal LLM units retain subprocess isolation.
 
     Returns a dict with: unit_id, status, parsed_output, charts, insights,
     error, retry_count, scripts, stdout.
@@ -329,9 +528,17 @@ def _execute_unit(
         if template_result is not None:
             return template_result
 
+    # ── In-process LLM (Transform / Filter) ──
+    if unit.unit_type in (UnitType.TRANSFORM, UnitType.FILTER):
+        return _execute_inprocess_llm(
+            unit, data_path, unit_output_dir, unit_retry_state,
+        )
+
+    # ── Terminal: subprocess sandbox (kept for creative code generation) ──
     retry_count = 0
     attempts: list[dict[str, str]] = []
     scripts: list[str] = []
+    model_used = "unknown"
 
     if unit_retry_state:
         retry_count = unit_retry_state.get("retry_count", 0)
@@ -357,7 +564,8 @@ def _execute_unit(
 
         # LLM call
         try:
-            llm = get_llm(temperature=0, node="analysis")
+            llm = get_llm(temperature=0, node="analysis_terminal")
+            model_used = _model_name(llm, "analysis_terminal")
             response = llm.invoke(prompt)
             raw = response.content if hasattr(response, "content") else str(response)
             code = str(raw) if not isinstance(raw, str) else raw
@@ -428,6 +636,8 @@ def _execute_unit(
                 "scripts": scripts,
                 "stdout": result.stdout,
                 "output_dir": unit_output_dir,
+                "source_code": code,
+                "model_used": model_used,
             }
 
         error_msg = (
@@ -461,6 +671,8 @@ def _execute_unit(
         "scripts": scripts,
         "stdout": "",
         "output_dir": unit_output_dir,
+        "source_code": attempts[-1]["code"] if attempts else None,
+        "model_used": model_used,
     }
 
 

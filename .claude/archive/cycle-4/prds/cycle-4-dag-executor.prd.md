@@ -333,25 +333,22 @@ Rules:
 
 | # | Milestone | Outcome | Status | Plan |
 |---|---|---|---|---|
-| 1 | PlanUnit model refactor + DAG engine overhaul | New PlanUnit with 3 types + execution_mode; `execute_dag` uses Parquet checkpoints; `merge_upstream_outputs` removed | complete | `.claude/plans/cycle-4-dag-executor.plan.md` |
-| 2 | Template system + MVP templates | 4–5 templates across 3 unit types; `dispatch()` routes by execution_mode; template return contract enforced | complete | `.claude/plans/cycle-4-dag-executor-m2.plan.md` |
-| 3 | LLM prompt refactor | LLM-generated code follows the same return contract as templates; per-unit-type prompt templates | complete | `.claude/plans/cycle-4-dag-executor-m3.plan.md` |
-| 4 | Single-unit rerun API | `POST /execution/units/{id}/rerun` + stale downstream marking + cascade-rerun option | complete | `.claude/plans/cycle-4-dag-executor-m4.plan.md` |
-| 5 | MVP integration test | 4-node DAG (Filter → Transform → Transform → Terminal) on real CSV; per-node rerun assertions | complete | `.claude/plans/cycle-4-dag-executor-m5.plan.md` |
+| 1 | PlanUnit model refactor + DAG engine overhaul | New PlanUnit with 3 types + execution_mode; `execute_dag` uses Parquet checkpoints; `merge_upstream_outputs` removed | complete | `../plans/cycle-4-dag-executor.plan.md` |
+| 2 | Template system + MVP templates | 4–5 templates across 3 unit types; `dispatch()` routes by execution_mode; template return contract enforced | complete | `../plans/cycle-4-dag-executor-m2.plan.md` |
+| 3 | LLM prompt refactor | LLM-generated code follows the same return contract as templates; per-unit-type prompt templates | complete | `../plans/cycle-4-dag-executor-m3.plan.md` |
+| 4 | Single-unit rerun API | `POST /execution/units/{id}/rerun` + stale downstream marking + cascade-rerun option | complete | `../plans/cycle-4-dag-executor-m4.plan.md` |
+| 5 | MVP integration test | 4-node DAG (Filter → Transform → Transform → Terminal) on real CSV; per-node rerun assertions | complete | `../plans/cycle-4-dag-executor-m5.plan.md` |
+| 6 | In-process function path + durable sessions | Transform/Filter LLM units share the template contract; completed sessions survive restarts | complete | `../plans/cycle-4-m6-inprocess-llm.plan.md` |
 
 ## Open Questions
 
-- [ ] Should `input_from` be explicit (set by user/Planner) or inferred from `depends_on`
-  (auto-follow the snapshot chain)? Explicit is safer for MVP but adds a field the user
-  must understand.
-- [ ] Should LLM-mode units keep the subprocess sandbox, or move to in-process `exec()`?
-  Subprocess is safer (hard isolation) but adds serialization overhead. In-process is
-  faster but trusts `static_guard` as the only safety boundary. **Leaning: keep
-  subprocess for LLM mode; template mode runs in-process since it's deterministic.**
-- [ ] When a unit is re-run and downstream units are marked stale, should the system
-  auto-detect which downstream units are actually affected (by checking if the unit's
-  output columns changed), or conservatively mark all transitive dependents as stale?
-  Conservative is correct; column-diff optimization can come later.
+- [x] `input_from` remains explicit and is set by the Planner/user. Dependencies define
+  execution order; they do not implicitly select a data branch.
+- [x] Transform/Filter LLM units use a restricted in-process generated-function path;
+  Terminal LLM units retain subprocess execution. This is an accepted trusted-local
+  boundary, not an OS sandbox. See D59.
+- [x] Rerun conservatively marks all transitive dependents stale. Column-diff
+  optimization is deferred until real usage demonstrates a need.
 
 ## Risks
 
@@ -363,4 +360,4 @@ Rules:
 | Existing test breakage from PlanUnit model change | Medium | Many tests construct PlanUnit instances | Add new fields as optional first; run full test suite after each milestone |
 
 ---
-*Status: DRAFT — requirements only. Implementation planning pending via /plan.*
+*Status: COMPLETE — Cycle 4 closed with M1-M6 delivered.*

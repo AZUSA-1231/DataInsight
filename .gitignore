@@ -37,3 +37,6 @@ CLAUDE.md
 real_test/train_intermediates/
 real_test/charts/
 real_test/train_analysis_report.md
+
+# Runtime sessions, uploads, checkpoints, and generated artifacts
+data/

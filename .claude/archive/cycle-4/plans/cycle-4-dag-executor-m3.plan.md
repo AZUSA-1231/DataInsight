@@ -1,6 +1,6 @@
 # Plan: LLM Prompt Refactor — Per-Unit-Type Return Contracts
 
-**Source PRD**: `.claude/prds/cycle-4-dag-executor.prd.md`
+**Source PRD**: `../prds/cycle-4-dag-executor.prd.md`
 **Selected Milestone**: 3 — LLM prompt refactor
 **Complexity**: Small
 

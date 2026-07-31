@@ -389,7 +389,7 @@ def bt_chat_msg() -> object:
 
 
 @pytest.fixture
-def api_client():
+def api_client(tmp_path):
     """FastAPI TestClient for API route tests."""
     from fastapi.testclient import TestClient
 
@@ -397,7 +397,7 @@ def api_client():
     from src.api.session import SessionStore
 
     # TestClient doesn't trigger lifespan — init session store manually
-    app.state.sessions = SessionStore()
+    app.state.sessions = SessionStore(tmp_path / "sessions")
     return TestClient(app)
 
 

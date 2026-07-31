@@ -1,6 +1,6 @@
 # Plan: Template System + MVP Templates
 
-**Source PRD**: `.claude/prds/cycle-4-dag-executor.prd.md`
+**Source PRD**: `../prds/cycle-4-dag-executor.prd.md`
 **Selected Milestone**: 2 — Template system + MVP templates
 **Complexity**: Medium
 

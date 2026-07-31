@@ -1,6 +1,6 @@
 # Plan: MVP Integration Test — 4-Node Template DAG
 
-**Source PRD**: `.claude/prds/cycle-4-dag-executor.prd.md`
+**Source PRD**: `../prds/cycle-4-dag-executor.prd.md`
 **Selected Milestone**: 5 — MVP integration test
 **Complexity**: Small
 

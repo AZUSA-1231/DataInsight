@@ -183,3 +183,4 @@ class AgentState(BaseModel):
     feedback: str | None = None
     dashboard_pins: list[dict[str, Any]] = []
     dialogue_history: list[dict[str, str]] = []
+    persisted_at: str | None = None

@@ -16,17 +16,22 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from src.agent.state import ExecutionMode, PlanUnit
+from src.agent.state import ExecutionMode, PlanUnit, UnitType
 
 logger = logging.getLogger(__name__)
 
 TemplateFunc = Callable[[pd.DataFrame, list[str], dict[str, Any]], dict[str, Any]]
+
+
+class TemplateContractError(ValueError):
+    """Raised when a template or generated function violates its unit contract."""
 
 
 # ── Transform templates ──────────────────────────────────────────────────────
@@ -250,6 +255,7 @@ def dispatch(
 
     try:
         template_output = template_fn(df, unit.input_columns, params)
+        return _build_template_result(unit, template_output, output_dir, df)
     except Exception as e:
         logger.error(
             "Template [%s] unit [%d] failed: %s",
@@ -258,9 +264,6 @@ def dispatch(
         return _error_result(
             unit, f"Template '{unit.template_name}' error: {e}"
         )
-
-    return _build_template_result(unit, template_output, output_dir, df)
-
 
 def _build_template_result(
     unit: PlanUnit,
@@ -274,6 +277,7 @@ def _build_template_result(
     attaches it via ``_result_df`` so ``_save_unit_checkpoint`` can
     write the Parquet checkpoint directly.
     """
+    _validate_template_output(unit, template_output, df)
     artifacts: list[str] = list(template_output.get("artifacts", []))
     charts = [a for a in artifacts if a.lower().endswith(".png")]
 
@@ -285,20 +289,19 @@ def _build_template_result(
         result_df = df.copy()
         for col_name, series in new_cols.items():
             result_df[col_name] = series
-        # Also write output.csv for downstream LLM-mode units that read via file
-        csv_path = os.path.join(output_dir, "output.csv")
-        result_df.to_csv(csv_path, index=False)
     elif utype == "filter":
         filtered_df = template_output.get("filtered_df")
         if filtered_df is not None:
             result_df = filtered_df
-            csv_path = os.path.join(output_dir, "output.csv")
-            result_df.to_csv(csv_path, index=False)
 
+    insights = list(template_output.get("insights", []))
+    if not insights and unit.template_name:
+        insights = [f"Template: {unit.template_name}"]
+    statistics = dict(template_output.get("statistics", {}))
     parsed_output: dict[str, Any] = {
         "charts": charts,
-        "statistics": {},
-        "insights": [f"Template: {unit.template_name}"],
+        "statistics": statistics,
+        "insights": insights,
     }
 
     result: dict[str, Any] = {
@@ -307,7 +310,7 @@ def _build_template_result(
         "parsed_output": parsed_output,
         "charts": charts,
         "insights": parsed_output["insights"],
-        "statistics": {},
+        "statistics": statistics,
         "error": None,
         "retry_count": 0,
         "scripts": [],
@@ -325,6 +328,79 @@ def _build_template_result(
     return result
 
 
+def _validate_template_output(
+    unit: PlanUnit,
+    output: dict[str, Any],
+    df: pd.DataFrame | None,
+) -> None:
+    """Enforce the shared return contract for template and LLM units."""
+    if not isinstance(output, dict):
+        raise TemplateContractError(
+            f"Unit function must return dict, got {type(output).__name__}"
+        )
+
+    artifacts = output.get("artifacts", [])
+    if not isinstance(artifacts, list) or not all(
+        isinstance(path, str) for path in artifacts
+    ):
+        raise TemplateContractError("artifacts must be a list of paths")
+    insights = output.get("insights", [])
+    statistics = output.get("statistics", {})
+    if not isinstance(insights, list) or not all(
+        isinstance(insight, str) for insight in insights
+    ):
+        raise TemplateContractError("insights must be a list of strings")
+    if not isinstance(statistics, dict):
+        raise TemplateContractError("statistics must be a dict")
+
+    if unit.unit_type == UnitType.TRANSFORM:
+        if df is None:
+            raise TemplateContractError("Transform contract requires the input DataFrame")
+        columns = output.get("columns")
+        if not isinstance(columns, dict):
+            raise TemplateContractError("Transform must return a columns dict")
+        if unit.output_columns and set(columns) != set(unit.output_columns):
+            raise TemplateContractError(
+                "Transform output columns do not match the declared contract: "
+                f"expected {unit.output_columns}, got {list(columns)}"
+            )
+        for name, series in columns.items():
+            if not isinstance(name, str) or not isinstance(series, pd.Series):
+                raise TemplateContractError(
+                    "Transform columns must map string names to pandas Series"
+                )
+            if len(series) != len(df) or not series.index.equals(df.index):
+                raise TemplateContractError(
+                    f"Transform column '{name}' changed row identity or row count"
+                )
+        return
+
+    if unit.unit_type == UnitType.FILTER:
+        if df is None:
+            raise TemplateContractError("Filter contract requires the input DataFrame")
+        filtered = output.get("filtered_df")
+        if not isinstance(filtered, pd.DataFrame):
+            raise TemplateContractError("Filter must return filtered_df")
+        if list(filtered.columns) != list(df.columns):
+            raise TemplateContractError("Filter must preserve the complete column set")
+        if len(filtered) > len(df) or not filtered.index.is_unique:
+            raise TemplateContractError("Filter must return a unique subset of input rows")
+        if not filtered.index.isin(df.index).all():
+            raise TemplateContractError("Filter introduced rows not present in its input")
+        snapshot_name = output.get("snapshot_name")
+        if not isinstance(snapshot_name, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]+", snapshot_name
+        ):
+            raise TemplateContractError(
+                "Filter snapshot_name must contain only letters, digits, '_' or '-'"
+            )
+        return
+
+    columns = output.get("columns", {})
+    if columns != {}:
+        raise TemplateContractError("Terminal units cannot produce data columns")
+
+
 def _error_result(unit: PlanUnit, message: str) -> dict[str, Any]:
     """Build a failed result dict for template errors."""
     return {
@@ -340,3 +416,83 @@ def _error_result(unit: PlanUnit, message: str) -> dict[str, Any]:
         "stdout": "",
         "output_dir": "",
     }
+
+
+# ── in-process LLM execution helpers ────────────────────────────────────────
+
+_SAFE_BUILTINS: dict[str, object] = {
+    "True": True,
+    "False": False,
+    "None": None,
+    "len": len,
+    "range": range,
+    "enumerate": enumerate,
+    "zip": zip,
+    "map": map,
+    "filter": filter,
+    "sorted": sorted,
+    "min": min,
+    "max": max,
+    "sum": sum,
+    "abs": abs,
+    "round": round,
+    "int": int,
+    "float": float,
+    "str": str,
+    "bool": bool,
+    "list": list,
+    "dict": dict,
+    "tuple": tuple,
+    "set": set,
+    "isinstance": isinstance,
+    "Exception": Exception,
+    "ValueError": ValueError,
+    "TypeError": TypeError,
+    "KeyError": KeyError,
+    "IndexError": IndexError,
+}
+
+
+def exec_llm_function(code: str) -> TemplateFunc:
+    """Compile LLM-generated code into a callable matching ``TemplateFunc``.
+
+    The code must define a function named ``_unit`` with signature
+    ``(df, input_columns, params) -> dict`` matching the per-unit-type
+    return contract.
+
+    Runs ``check_static`` first. The function executes in a restricted
+    namespace without ``os``/``sys``/``subprocess``/``open``/``eval``.
+    """
+    from src.sandbox.static_guard import check_static
+
+    safe, reason = check_static(code)
+    if not safe:
+        raise ValueError(f"LLM code rejected by static guard: {reason}")
+
+    for pattern in (
+        r"\bpd\.read_",
+        r"\.to_(?:csv|excel|parquet|pickle|json)\(",
+        r"\bopen\(",
+    ):
+        if re.search(pattern, code):
+            raise ValueError(f"LLM code rejected: in-process file I/O ({pattern})")
+
+    safe_ns: dict[str, object] = {
+        "pd": pd,
+        "np": np,
+        "__builtins__": _SAFE_BUILTINS,
+    }
+
+    try:
+        exec(code, safe_ns)
+    except Exception as exc:
+        raise ValueError(f"LLM code compilation failed: {exc}") from exc
+
+    fn = safe_ns.get("_unit")
+    if not callable(fn):
+        raise ValueError(
+            "LLM code must define a function named '_unit'. "
+            f"Found: {type(fn).__name__}"
+        )
+
+    return fn

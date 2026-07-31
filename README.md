@@ -1,143 +1,108 @@
-# DataInsight — Progressive Data Analysis AI Agent
+# DataInsight
 
-DataInsight is an LLM-driven data analysis agent that enforces a mandatory
-**6-stage LangGraph state machine** before producing any report. It never
-"blindly executes" — every analysis walks through inspect → reason → plan →
-clean → analyze → report.
+DataInsight is a local, single-user data analysis workspace for turning CSV or
+Excel data and a business question into an inspectable analysis plan, a
+re-runnable execution DAG, charts, and a Markdown report.
 
-## Philosophy
+The project deliberately separates business intent from execution. The LLM
+does not jump directly from a question to a report: data is inspected first,
+the workspace plan is reviewed, and every execution unit follows a structured
+data contract.
 
-Most AI data tools skip straight to code generation. DataInsight forces the
-LLM to understand the data, derive business requirements, reconcile gaps, and
-only then execute — producing reports that acknowledge what the data *can't*
-answer as honestly as what it can.
+## Current Architecture
 
-## Architecture
-
-```
+```text
 START
-  │
-  ├─ Stage 1a: Data Track        ← deterministic inspection + LLM cleaning audit
-  ├─ Stage 1b: Business Track    ← LLM derives structured AnalysisIntent
-  ├─ Stage 2:  Planner           ← LLM aligns business intent with data reality
-  ├─ Stage 3:  Preprocessing     ← LLM code gen → sandbox clean → ReAct retry
-  ├─ Stage 4:  Analysis          ← N parallel units, each with ReAct retry (max 3)
-  └─ Stage 5:  Report Gen        ← LLM assembles full/partial Markdown report
-  │
-  END
-  │
-  └─ Feedback loop: user feedback → Planner → Preprocessing → Analysis → Report
+  -> data_track       deterministic profile and unified columns
+  -> business_track   workspace-aware business instruction
+  -> planner          validated Plan with DAG units
+  -> analysis         topological unit execution and checkpoints
+  -> report_gen       Markdown report and alignment notes
+  -> END
+
+feedback -> business_track -> planner -> analysis -> report_gen
 ```
 
-Every report includes a mandatory **Data & Business Alignment Notes** chapter
-that explicitly calls out gaps between what the user asked and what the data
-can actually answer.
+Analysis units use one of three contracts:
 
-## Quick Start
+| Unit | Contract | Execution |
+|---|---|---|
+| Transform | add declared columns, preserve row identity | template or restricted generated function |
+| Filter | return a named subset snapshot, preserve columns | template or restricted generated function |
+| Terminal | produce charts or other artifacts | template or subprocess sandbox |
 
-### 1. Install
+Data moves between units through Parquet checkpoints. Runtime session state is
+stored in `data/sessions/{session_id}/state.json`; checkpoints and artifacts are
+stored below `data/output/{session_id}/`.
+
+## Web Workspace
+
+Install the API dependencies and start the local server:
+
+```bash
+pip install -e ".[dev,web]"
+uvicorn src.api.app:app --reload
+```
+
+Open `http://127.0.0.1:8000`. The zero-build frontend supports upload, field
+selection, workspace editing, dialogue, execution, dashboard pins, and report
+generation. The active session is restored after a server or browser restart.
+
+## CLI
 
 ```bash
 pip install -e ".[dev]"
+python -m src sales.csv "Why did Q2 sales drop?"
 ```
 
-### 2. Configure LLM
+Useful options:
 
-Copy `.env.example` to `.env` and fill in your credentials:
+| Flag | Purpose |
+|---|---|
+| `-o`, `--output` | Markdown output path |
+| `-s`, `--save-intermediates` | Save prompts, scripts, and charts |
+| `-v`, `--verbose` | Enable debug logging |
+
+## LLM Configuration
+
+Copy `.env.example` to `.env` and provide an OpenAI-compatible endpoint:
+
+```dotenv
+DATAINSIGHT_LLM_MODEL=your-default-model
+DATAINSIGHT_LLM_API_KEY=your-key
+DATAINSIGHT_LLM_BASE_URL=https://example.com/v1
+```
+
+Optional stage overrides include `DATAINSIGHT_LLM_MODEL_PLANNER`,
+`DATAINSIGHT_LLM_MODEL_ANALYSIS_TRANSFORM`, and
+`DATAINSIGHT_LLM_MODEL_ANALYSIS_TERMINAL`.
+
+## Validation
 
 ```bash
-DATAINSIGHT_LLM_MODEL=deepseek-v4-flash
-DATAINSIGHT_LLM_API_KEY=sk-your-key-here
-DATAINSIGHT_LLM_BASE_URL=https://api.deepseek.com/v1
-DATAINSIGHT_LLM_TEMPERATURE=0
-```
-
-Per-node model overrides (optional):
-
-```bash
-DATAINSIGHT_LLM_MODEL_PLANNER=deepseek-v4-pro   # planner gets a stronger model
-DATAINSIGHT_LLM_MODEL_ANALYSIS=deepseek-v4-flash
-```
-
-### 3. Run
-
-```bash
-python -m src sales.csv "Why did Q2 sales drop by 15%?"
-```
-
-Options:
-
-| Flag | Description |
-|------|-------------|
-| `-o`, `--output` | Output Markdown path (default: `<input>_analysis_report.md`) |
-| `-s`, `--save-intermediates` | Save all intermediate artifacts + chart images |
-| `-v`, `--verbose` | Debug logging |
-
-Output: `sales_analysis_report.md` with charts embedded inline.
-
-### 4. Iterate
-
-After seeing the report, type feedback:
-
-```
-Feedback (Enter to exit): The chart should use monthly data, not quarterly.
-```
-
-The agent re-plans from the Planner stage (reusing Data/Business Track results)
-and generates a revised report.
-
-## Supported File Formats
-
-- `.csv` — with automatic encoding detection (utf-8, gbk, latin-1, etc.)
-- `.xlsx` / `.xls` — first sheet
-
-## Commands
-
-```bash
-# Run all tests (114 tests)
-pytest -v
-
-# Run specific test file
-pytest -v tests/test_analysis.py
-
-# Run tests by marker
-pytest -v -m unit
-pytest -v -m integration
-
-# Lint & format & type check
+pytest -q
 ruff check .
-ruff format .
 mypy src/
 ```
 
-## Project Structure
+The Cycle 4 closure baseline is 269 passing tests, clean Ruff output, and clean
+strict mypy output.
 
-```
-src/
-├── __main__.py              ← CLI entry point (argparse, feedback loop)
-├── agent/
-│   ├── state.py             ← AgentState (Pydantic BaseModel, immutable)
-│   ├── graph.py             ← LangGraph StateGraph (6 nodes + conditional edges)
-│   ├── llm.py               ← LLM factory (env-var driven, per-node model override)
-│   └── nodes/
-│       ├── data_track.py    ← Stage 1a: deterministic inspection + LLM audit
-│       ├── business_track.py← Stage 1b: pure business reasoning → AnalysisIntent
-│       ├── planner.py       ← Stage 2:  data-business alignment → ExecutionPlan
-│       ├── preprocessing.py ← Stage 3:  code gen + sandbox clean + ReAct retry
-│       ├── analysis.py      ← Stage 4:  N parallel units, each ReAct retry (max 3)
-│       └── report_gen.py    ← Stage 5:  Markdown report with embedded charts
-├── sandbox/
-│   ├── inspection_script.py ← Trusted deterministic script (never LLM-generated)
-│   ├── static_guard.py      ← Static code safety checker (banned imports/patterns)
-│   └── executor.py          ← subprocess.run sandbox (configurable timeout)
-tests/                       ← 114 tests mirroring src/
+## Repository Map
+
+```text
+src/agent/              state, graph, planner, DAG, templates, execution nodes
+src/api/                FastAPI session-scoped workspace API
+src/sandbox/            deterministic inspection and terminal subprocess runner
+static/                 zero-build browser workspace
+tests/                  unit, integration, and API tests
+docs/                   current product, architecture, and roadmap documents
+.claude/archive/        historical Cycle 1-4 development artifacts
 ```
 
-## Requirements
+## Security Boundary
 
-- Python 3.12+
-- LLM API key (OpenAI-compatible)
-
-## License
-
-MIT
+DataInsight is currently designed for a trusted, local, single-user workflow.
+Transform and Filter code is statically checked and executed with restricted
+builtins, but it is not an operating-system sandbox. Terminal code retains a
+subprocess timeout. Do not expose the current API directly to untrusted users.

@@ -9,7 +9,6 @@ from src.agent.state import AgentState, AnalysisIntent, PlannerInstruction
 
 # ── BT Agent: conversational response tests ───────────────────────
 
-
 @pytest.mark.unit
 def test_bt_agent_conversational_response(set_llm_env: None, bt_chat_msg: object) -> None:
     """BT Agent returns conversational text when LLM doesn't call a tool."""

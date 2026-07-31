@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -13,14 +13,15 @@ from src.api.schemas import (
     UnitUpdateRequest,
     WorkspacePlanResponse,
 )
+from src.api.session import SessionStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions/{session_id}", tags=["workspace"])
 
 
-def _get_store(request: Request) -> Any:
-    return request.app.state.sessions
+def _get_store(request: Request) -> SessionStore:
+    return cast(SessionStore, request.app.state.sessions)
 
 
 def _reindex_units(units: list[PlanUnit]) -> list[PlanUnit]:

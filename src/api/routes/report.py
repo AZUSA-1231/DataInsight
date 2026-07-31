@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request
 
 from src.agent.nodes.report_gen import report_gen_node
 from src.api.schemas import ReportResponse
+from src.api.session import SessionStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions/{session_id}/report", tags=["report"])
 
 
-def _get_store(request: Request) -> Any:
-    return request.app.state.sessions
+def _get_store(request: Request) -> SessionStore:
+    return cast(SessionStore, request.app.state.sessions)
 
 
 @router.post("/generate", response_model=ReportResponse)

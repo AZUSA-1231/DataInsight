@@ -125,6 +125,22 @@ class TestExecutionRoutes:
         )
         assert resp.status_code == 404
 
+    def test_serve_nested_session_chart(
+        self, api_client, test_session, tmp_path
+    ):
+        chart = tmp_path / test_session / "analysis" / "unit_4" / "scatter.png"
+        chart.parent.mkdir(parents=True)
+        chart.write_bytes(b"fake-png")
+
+        with patch("src.api.routes.execution.OUTPUT_DIR", tmp_path):
+            resp = api_client.get(
+                f"/api/sessions/{test_session}/execution/charts/"
+                "analysis/unit_4/scatter.png"
+            )
+
+        assert resp.status_code == 200
+        assert resp.content == b"fake-png"
+
     # --- M4: unit rerun ---
 
     def test_rerun_unit_success(self, api_client, test_session, sample_plan):

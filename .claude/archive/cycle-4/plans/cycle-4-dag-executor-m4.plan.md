@@ -1,6 +1,6 @@
 # Plan: Single-Unit Rerun API
 
-**Source PRD**: `.claude/prds/cycle-4-dag-executor.prd.md`
+**Source PRD**: `../prds/cycle-4-dag-executor.prd.md`
 **Selected Milestone**: 4 — Single-unit rerun API
 **Complexity**: Medium
 

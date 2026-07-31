@@ -3,19 +3,20 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request
 
 from src.api.schemas import DashboardResponse, PinChartRequest, PinChartResponse
+from src.api.session import SessionStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions/{session_id}/dashboard", tags=["dashboard"])
 
 
-def _get_store(request: Request) -> Any:
-    return request.app.state.sessions
+def _get_store(request: Request) -> SessionStore:
+    return cast(SessionStore, request.app.state.sessions)
 
 
 @router.get("", response_model=DashboardResponse)

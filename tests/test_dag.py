@@ -237,15 +237,17 @@ def test_validate_case_sensitive() -> None:
 
 
 @pytest.mark.unit
-def test_checkpoint_path_wide() -> None:
-    path = _checkpoint_path("/tmp/session", "wide", 1)
-    assert path == os.path.join("/tmp/session", "checkpoints", "wide_l1.parquet")
+def test_checkpoint_path_wide(tmp_path) -> None:
+    session_dir = str(tmp_path / "session")
+    path = _checkpoint_path(session_dir, "wide", 1)
+    assert path == os.path.join(session_dir, "checkpoints", "wide_l1.parquet")
 
 
 @pytest.mark.unit
-def test_checkpoint_path_snapshot() -> None:
-    path = _checkpoint_path("/tmp/session", "recent", 2)
-    expected = os.path.join("/tmp/session", "checkpoints", "snapshots", "recent_l2.parquet")
+def test_checkpoint_path_snapshot(tmp_path) -> None:
+    session_dir = str(tmp_path / "session")
+    path = _checkpoint_path(session_dir, "recent", 2)
+    expected = os.path.join(session_dir, "checkpoints", "snapshots", "recent_l2.parquet")
     assert path == expected
 
 
@@ -1053,10 +1055,7 @@ def test_mvp_dag_4_node_template_chain(sample_csv_100_rows: str, tmp_path) -> No
     assert rerun2 is not None
     assert rerun2["status"] == "success"
 
-    # Load the rerun output.csv and compare margin
-    rerun_csv = os.path.join(str(tmp_path), "unit_2_rerun", "output.csv")
-    assert os.path.exists(rerun_csv)
-    df_rerun2 = pd.read_csv(rerun_csv)
+    df_rerun2 = rerun2["_result_df"]
     pd.testing.assert_series_equal(
         df_rerun2["margin"], df_l1["margin"], check_names=False,
     )
@@ -1068,8 +1067,7 @@ def test_mvp_dag_4_node_template_chain(sample_csv_100_rows: str, tmp_path) -> No
     rerun3 = _dispatch(unit3, df_rerun2, rerun3_dir)
     assert rerun3 is not None
     assert rerun3["status"] == "success"
-    rerun3_csv = os.path.join(str(tmp_path), "unit_3_rerun", "output.csv")
-    df_rerun3 = pd.read_csv(rerun3_csv)
+    df_rerun3 = rerun3["_result_df"]
     import numpy as np
     assert np.allclose(
         df_rerun3["predicted_volume"].values,

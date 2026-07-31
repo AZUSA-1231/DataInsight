@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -94,15 +95,6 @@ def test_graph_data_track_integration(
     mock_rg = MagicMock()
     mock_rg.invoke.return_value = MagicMock(content="# DataInsight Report\n\nMocked.")
 
-    from src.sandbox.executor import SandboxResult
-
-    an_sandbox_result = SandboxResult(
-        stdout='{"cleaned_shape": {"rows": 5, "cols": 2}}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
-
     state = AgentState(
         file_path=sample_csv_path,
         user_requirement="Test requirement",
@@ -114,7 +106,14 @@ def test_graph_data_track_integration(
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
-        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
+        patch("src.agent.nodes.analysis._execute_inprocess_llm", return_value={
+            "unit_id": 1, "status": "success",
+            "parsed_output": {"charts": [], "statistics": {}, "insights": ["ok"]},
+            "charts": [], "insights": ["ok"], "statistics": {},
+            "error": None, "retry_count": 0, "scripts": [], "stdout": "",
+            "output_dir": "/tmp/out/unit_1",
+            "_result_df": pd.DataFrame({"A": [1]}), "_input_row_count": 1,
+        }),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         graph.invoke(state)
@@ -182,7 +181,6 @@ def test_graph_m3_execution_integration(
     from src.agent.nodes.business_track import business_track_node
     from src.agent.nodes.data_track import data_track_node
     from src.agent.nodes.planner import planner_node
-    from src.sandbox.executor import SandboxResult
 
     mock_bt = MagicMock()
     mock_bt.bind_tools.return_value = mock_bt
@@ -194,17 +192,6 @@ def test_graph_m3_execution_integration(
     mock_an = MagicMock()
     mock_an.invoke.return_value = MagicMock(content="print('{}')\n")
 
-    an_sandbox_result = SandboxResult(
-        stdout='{"cleaned_shape": {"rows": 10, "cols": 3},'
-        ' "cleaning_actions": ["dropped nulls"],'
-        ' "charts": ["out/chart1.png"],'
-        ' "statistics": {},'
-        ' "insights": ["Sales rose in Q3"]}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
-
     state = AgentState(
         file_path=sample_csv_path,
         user_requirement="Why did Q2 sales drop?",
@@ -214,7 +201,25 @@ def test_graph_m3_execution_integration(
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
-        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
+        patch(
+            "src.agent.nodes.analysis._execute_inprocess_llm",
+            return_value={
+                "unit_id": 1, "status": "success",
+                "parsed_output": {
+                    "charts": ["out/chart1.png"],
+                    "statistics": {},
+                    "insights": ["Sales rose in Q3"],
+                },
+                "charts": ["out/chart1.png"],
+                "insights": ["Sales rose in Q3"],
+                "statistics": {},
+                "error": None, "retry_count": 0,
+                "scripts": [], "stdout": "",
+                "output_dir": "/tmp/out/unit_1",
+                "_result_df": pd.DataFrame({"A": [1]}),
+                "_input_row_count": 1,
+            },
+        ),
     ):
         dt_update = data_track_node(state)
         state = AgentState(**(state.model_dump() | dt_update))
@@ -240,7 +245,7 @@ def test_graph_m3_execution_integration(
 
     mock_bt.invoke.assert_called_once()
     mock_dm.invoke.assert_called_once()
-    mock_an.invoke.assert_called_once()
+    # mock_an is unused — _execute_inprocess_llm was mocked instead
 
 
 @pytest.mark.integration
@@ -258,7 +263,6 @@ def test_graph_m4_full_pipeline(
     from src.agent.nodes.data_track import data_track_node
     from src.agent.nodes.planner import planner_node
     from src.agent.nodes.report_gen import report_gen_node
-    from src.sandbox.executor import SandboxResult
 
     mock_bt = MagicMock()
     mock_bt.bind_tools.return_value = mock_bt
@@ -275,13 +279,6 @@ def test_graph_m4_full_pipeline(
         content="# DataInsight 数据分析报告\n\nFull report with 数据与业务对齐备忘."
     )
 
-    an_sandbox_result = SandboxResult(
-        stdout='{"cleaned_shape": {"rows": 10, "cols": 3}}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
-
     state = AgentState(
         file_path=sample_csv_path,
         user_requirement="Why did Q2 sales drop?",
@@ -291,7 +288,14 @@ def test_graph_m4_full_pipeline(
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
-        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
+        patch("src.agent.nodes.analysis._execute_inprocess_llm", return_value={
+            "unit_id": 1, "status": "success",
+            "parsed_output": {"charts": [], "statistics": {}, "insights": ["ok"]},
+            "charts": [], "insights": ["ok"], "statistics": {},
+            "error": None, "retry_count": 0, "scripts": [], "stdout": "",
+            "output_dir": "/tmp/out/unit_1",
+            "_result_df": pd.DataFrame({"A": [1]}), "_input_row_count": 1,
+        }),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         dt_update = data_track_node(state)
@@ -329,7 +333,6 @@ def test_graph_feedback_iteration(
     from src.agent.nodes.planner import planner_node
     from src.agent.nodes.report_gen import report_gen_node
     from src.agent.state import Plan, PlanUnit
-    from src.sandbox.executor import SandboxResult
 
     existing_plan = Plan(
         units=[
@@ -390,18 +393,18 @@ def test_graph_feedback_iteration(
         content="# DataInsight 数据分析报告\n\nRevised report."
     )
 
-    an_sandbox_result = SandboxResult(
-        stdout='{"cleaned_shape": {"rows": 10, "cols": 3}}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
-
     with (
         patch("src.agent.nodes.business_track.get_llm", return_value=mock_bt),
         patch("src.agent.nodes.planner.get_llm", return_value=mock_dm),
         patch("src.agent.nodes.analysis.get_llm", return_value=mock_an),
-        patch("src.agent.nodes.analysis.run_script", return_value=an_sandbox_result),
+        patch("src.agent.nodes.analysis._execute_inprocess_llm", return_value={
+            "unit_id": 1, "status": "success",
+            "parsed_output": {"charts": [], "statistics": {}, "insights": ["ok"]},
+            "charts": [], "insights": ["ok"], "statistics": {},
+            "error": None, "retry_count": 0, "scripts": [], "stdout": "",
+            "output_dir": "/tmp/out/unit_1",
+            "_result_df": pd.DataFrame({"A": [1]}), "_input_row_count": 1,
+        }),
         patch("src.agent.nodes.report_gen.get_llm", return_value=mock_rg),
     ):
         bt_update, _ = business_track_node(state)

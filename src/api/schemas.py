@@ -22,6 +22,7 @@ class SessionStateResponse(BaseModel):
     has_results: bool
     has_report: bool
     error: str | None = None
+    persisted_at: str | None = None
 
 
 # --- Data Pool ---

@@ -1,7 +1,7 @@
 # Architecture Decision Log — DataInsight (Cycle 4)
 
 Decisions made during Cycle 4 development. Cycle 3 decisions are archived at
-[.claude/archive/cycle-3/decisions.md](.claude/archive/cycle-3/decisions.md).
+[Cycle 3 decisions](../cycle-3/decisions.md).
 
 ---
 
@@ -116,3 +116,57 @@ Terminal unit: reads parquet → produces artifacts/ only (no data checkpoint)
 - Timeout 风险：单个 LLM-mode unit 最多 120s（sandbox timeout），对于 HTTP 请求较长但可接受
 
 **Re-evaluate**: 如果 cascade rerun 扩展到 10+ units 且总时长超过 60s，考虑改为后台任务 + WebSocket 推送进度。
+
+---
+
+## D59 — Transform/Filter 使用进程内临时模板，Terminal 保留 subprocess
+
+**Date**: 2026-07-13
+**Milestone**: M6 (In-Process LLM)
+
+**Decision**: LLM-mode Transform/Filter 不再生成完整脚本或经过 CSV round-trip。
+LLM 生成符合 `TemplateFunc` 契约的 `_unit(df, input_columns, params)`，经静态检查和
+受限 namespace 编译后，与永久模板共用结果构建、契约校验和 checkpoint 路径。
+Terminal 仍生成完整脚本并在带超时的 subprocess 中运行。
+
+**Rationale**:
+- Transform/Filter 的行列契约严格，完整脚本的 CLI、文件读写和 JSON stdout 都是重复样板
+- 两种来源共用函数契约后，重试与 checkpoint 行为一致
+- Terminal 需要绘图和开放式 artifact 生成，继续保留进程边界更合适
+
+**Boundary**: 进程内路径只面向可信的本地单用户场景。受限 builtins 和 static guard
+不是 OS sandbox，也没有硬 CPU/内存隔离。外部托管前必须重新评估 worker isolation。
+
+---
+
+## D60 — SessionStore 采用 JSON durable state + 瞬态值剥离
+
+**Date**: 2026-07-31
+**Milestone**: M6 closure
+
+**Decision**: `SessionStore` 保留内存缓存，同时在每次 create/update 后原子写入
+`data/sessions/{session_id}/state.json`。进程重启后，`get()` 首次访问时从磁盘懒加载。
+
+**Serialization contract**:
+- `analysis_result` 中以 `_` 开头的 key 是 executor-only，不持久化
+- `_result_df` 只用于当前执行写 Parquet checkpoint，不进入 JSON
+- source code、真实 model name、insights、chart references、Plan、pins、report 均持久化
+- `persisted_at` 记录最近一次成功写盘时间
+
+**Rationale**: 让完成的分析成为可重新打开的 workspace，同时避免把 DataFrame
+复制进 JSON。Parquet 和 artifact 文件仍是大数据/二进制结果的 source of truth。
+
+---
+
+## D61 — API execution 使用稳定 session output root
+
+**Date**: 2026-07-31
+**Milestone**: M6 closure
+
+**Decision**: API analysis 输出固定在 `data/output/{session_id}/analysis/`，不再使用
+进程临时目录。图表 API 只返回并接受相对于 `data/output/{session_id}` 的路径。
+
+**Rationale**:
+- JSON state 持久化只有在 artifact 路径跨进程有效时才有意义
+- 相对引用使 workspace 可以在重启后加载，同时避免向前端泄露本机绝对路径
+- chart serving 继续校验 resolved path 位于 session output root 内

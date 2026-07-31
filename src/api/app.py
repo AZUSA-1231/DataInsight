@@ -64,6 +64,7 @@ def create_app() -> FastAPI:
             has_results=state.analysis_result is not None,
             has_report=state.final_report is not None,
             error=state.error,
+            persisted_at=state.persisted_at,
         )
 
     @app.delete("/api/sessions/{session_id}", tags=["sessions"])

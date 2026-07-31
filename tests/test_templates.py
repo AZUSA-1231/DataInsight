@@ -12,6 +12,7 @@ from src.agent.templates import (
     _build_template_result,
     _error_result,
     dispatch,
+    exec_llm_function,
     filter_by_date,
     terminal_scatter_plot,
     transform_column_arithmetic,
@@ -290,10 +291,7 @@ def test_dispatch_template_arithmetic(sample_df: pd.DataFrame, tmp_path) -> None
     assert result is not None
     assert result["status"] == "success"
     assert result["unit_id"] == 1
-    # Check output.csv was written
-    csv_path = os.path.join(str(tmp_path), "output.csv")
-    assert os.path.exists(csv_path)
-    loaded = pd.read_csv(csv_path)
+    loaded = result["_result_df"]
     assert "margin" in loaded.columns
 
 
@@ -308,8 +306,7 @@ def test_dispatch_template_filter(sample_df: pd.DataFrame, tmp_path) -> None:
     assert result is not None
     assert result["status"] == "success"
     assert result["snapshot_name"] == "recent"
-    csv_path = os.path.join(str(tmp_path), "output.csv")
-    assert os.path.exists(csv_path)
+    assert len(result["_result_df"]) == 3
 
 
 @pytest.mark.unit
@@ -356,19 +353,19 @@ def test_build_template_result_transform(sample_df: pd.DataFrame, tmp_path) -> N
     assert result["scripts"] == []
     assert result["stdout"] == ""
     assert "output_dir" in result
-    csv_path = os.path.join(str(tmp_path), "output.csv")
-    assert os.path.exists(csv_path)
+    assert result["_result_df"]["margin"].equals(tpl_out["columns"]["margin"])
+    assert not os.path.exists(os.path.join(str(tmp_path), "output.csv"))
 
 
 @pytest.mark.unit
 def test_build_template_result_filter(sample_df: pd.DataFrame, tmp_path) -> None:
     unit = _tu(unit_type="filter", template_name="filter_by_date")
     tpl_out = {"filtered_df": sample_df.head(2), "snapshot_name": "recent", "artifacts": []}
-    result = _build_template_result(unit, tpl_out, str(tmp_path))
+    result = _build_template_result(unit, tpl_out, str(tmp_path), sample_df)
     assert result["status"] == "success"
     assert result["snapshot_name"] == "recent"
-    csv_path = os.path.join(str(tmp_path), "output.csv")
-    assert os.path.exists(csv_path)
+    assert result["_result_df"].equals(sample_df.head(2))
+    assert not os.path.exists(os.path.join(str(tmp_path), "output.csv"))
 
 
 @pytest.mark.unit
@@ -424,3 +421,64 @@ def test_registry_has_four_templates() -> None:
 def test_registry_functions_are_callable() -> None:
     for name, fn in TEMPLATE_REGISTRY.items():
         assert callable(fn), f"{name} is not callable"
+
+
+# ── generated function execution ────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_exec_llm_function_safe(sample_df: pd.DataFrame) -> None:
+    fn = exec_llm_function(
+        "def _unit(df, input_columns, params):\n"
+        "    values = df[input_columns[0]] + df[input_columns[1]]\n"
+        "    return {'columns': {'margin': values}, 'artifacts': []}\n"
+    )
+
+    output = fn(sample_df, ["revenue", "cost"], {})
+
+    assert output["columns"]["margin"].equals(
+        sample_df["revenue"] + sample_df["cost"]
+    )
+
+
+@pytest.mark.unit
+def test_exec_llm_function_blocks_file_io() -> None:
+    with pytest.raises(ValueError, match="file I/O"):
+        exec_llm_function(
+            "def _unit(df, input_columns, params):\n"
+            "    return {'columns': {'x': pd.read_csv('secret.csv')['x']}}\n"
+        )
+
+
+@pytest.mark.unit
+def test_exec_llm_function_requires_unit_function() -> None:
+    with pytest.raises(ValueError, match="must define"):
+        exec_llm_function("value = 1\n")
+
+
+@pytest.mark.unit
+def test_transform_contract_rejects_wrong_columns(
+    sample_df: pd.DataFrame, tmp_path
+) -> None:
+    unit = _tu(outputs=["expected"])
+    output = {"columns": {"other": sample_df["revenue"]}, "artifacts": []}
+
+    with pytest.raises(ValueError, match="declared contract"):
+        _build_template_result(unit, output, str(tmp_path), sample_df)
+
+
+@pytest.mark.unit
+def test_filter_contract_rejects_new_rows(
+    sample_df: pd.DataFrame, tmp_path
+) -> None:
+    unit = _tu(unit_type="filter")
+    filtered = sample_df.head(2).copy()
+    filtered.index = [100, 101]
+    output = {
+        "filtered_df": filtered,
+        "snapshot_name": "recent",
+        "artifacts": [],
+    }
+
+    with pytest.raises(ValueError, match="introduced rows"):
+        _build_template_result(unit, output, str(tmp_path), sample_df)

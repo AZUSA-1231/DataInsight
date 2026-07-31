@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from src.agent.nodes.analysis import (
+    _build_inprocess_prompt,
     _build_unit_code_prompt,
     _build_unit_react_fix_prompt,
     _build_upstream_context,
+    _execute_inprocess_llm,
     _serialize_unit,
     analysis_node,
 )
-from src.agent.state import AgentState
+from src.agent.state import AgentState, PlanUnit
 from src.sandbox.executor import SandboxResult
 
 
@@ -27,8 +31,8 @@ def test_serialize_unit(sample_plan: object) -> None:
 
 
 @pytest.mark.unit
-def test_build_unit_code_prompt_structure(sample_plan: object) -> None:
-    unit = sample_plan.units[0]
+def test_build_unit_code_prompt_structure() -> None:
+    unit = PlanUnit(unit_id=1, purpose="生成销售图表", unit_type="terminal")
     prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out")
 
     assert "data analyst" in prompt.lower()
@@ -42,12 +46,12 @@ def test_build_unit_code_prompt_structure(sample_plan: object) -> None:
     assert "insights" in prompt
     assert "/tmp/data.csv" in prompt
     assert "/tmp/out" in prompt
-    assert "按区域分析销售趋势" in prompt
+    assert "生成销售图表" in prompt
 
 
 @pytest.mark.unit
-def test_build_unit_react_fix_prompt_includes_error(sample_plan: object) -> None:
-    unit = sample_plan.units[0]
+def test_build_unit_react_fix_prompt_includes_error() -> None:
+    unit = PlanUnit(unit_id=1, purpose="生成销售图表", unit_type="terminal")
     prompt = _build_unit_react_fix_prompt(
         unit,
         "df.corr()\n",
@@ -60,7 +64,7 @@ def test_build_unit_react_fix_prompt_includes_error(sample_plan: object) -> None
     assert "KeyError: 'sales'" in prompt
     assert "df.corr()" in prompt
     assert "FIXED" in prompt
-    assert "按区域分析销售趋势" in prompt
+    assert "生成销售图表" in prompt
 
 
 @pytest.mark.unit
@@ -96,32 +100,131 @@ def test_analysis_node_no_units_skips(set_llm_env: None, make_plan: object) -> N
     assert result["unit_results"] == []
 
 
+def _mock_inprocess_success(unit_id: int, output_dir: str) -> dict[str, Any]:
+    """Fake a successful in-process LLM result for Transform/Filter tests."""
+    return {
+        "unit_id": unit_id,
+        "status": "success",
+        "parsed_output": {
+            "charts": ["out/chart1.png"],
+            "statistics": {"correlations": {"sales_revenue": 0.85}},
+            "insights": ["Sales correlates with revenue"],
+        },
+        "charts": ["out/chart1.png"],
+        "insights": ["Sales correlates with revenue"],
+        "statistics": {"correlations": {"sales_revenue": 0.85}},
+        "error": None,
+        "retry_count": 0,
+        "scripts": [],
+        "stdout": "",
+        "output_dir": output_dir,
+        "source_code": "def _unit(df, c, p): return {'columns': {}}",
+        "model_used": "mock",
+        "_result_df": pd.DataFrame({"A": [1, 2]}),
+        "_input_row_count": 2,
+    }
+
+
+@pytest.mark.unit
+def test_inprocess_transform_llm(
+    set_llm_env: None, tmp_path
+) -> None:
+    _ = set_llm_env
+    data_path = tmp_path / "data.csv"
+    pd.DataFrame({"revenue": [10, 20], "cost": [3, 7]}).to_csv(
+        data_path, index=False
+    )
+    unit = PlanUnit(
+        unit_id=1,
+        purpose="calculate margin",
+        unit_type="transform",
+        input_columns=["revenue", "cost"],
+        output_columns=["margin"],
+    )
+    code = (
+        "def _unit(df, input_columns, params):\n"
+        "    margin = df[input_columns[0]] - df[input_columns[1]]\n"
+        "    return {'columns': {'margin': margin}, 'artifacts': []}\n"
+    )
+    llm = MagicMock()
+    llm.invoke.return_value = MagicMock(content=code)
+
+    with patch("src.agent.nodes.analysis.get_llm", return_value=llm):
+        result = _execute_inprocess_llm(unit, str(data_path), str(tmp_path / "out"))
+
+    assert result["status"] == "success"
+    assert result["source_code"] == code.strip()
+    assert result["_result_df"]["margin"].tolist() == [7, 13]
+    assert result["retry_count"] == 0
+
+
+@pytest.mark.unit
+def test_inprocess_filter_llm(set_llm_env: None, tmp_path) -> None:
+    _ = set_llm_env
+    data_path = tmp_path / "data.csv"
+    pd.DataFrame({"value": [1, 2, 3]}).to_csv(data_path, index=False)
+    unit = PlanUnit(
+        unit_id=1,
+        purpose="keep high values",
+        unit_type="filter",
+        input_columns=["value"],
+    )
+    code = (
+        "def _unit(df, input_columns, params):\n"
+        "    filtered = df[df[input_columns[0]] >= 2]\n"
+        "    return {'filtered_df': filtered, 'snapshot_name': 'high', "
+        "'artifacts': []}\n"
+    )
+    llm = MagicMock()
+    llm.invoke.return_value = MagicMock(content=code)
+
+    with patch("src.agent.nodes.analysis.get_llm", return_value=llm):
+        result = _execute_inprocess_llm(unit, str(data_path), str(tmp_path / "out"))
+
+    assert result["status"] == "success"
+    assert result["snapshot_name"] == "high"
+    assert result["_result_df"]["value"].tolist() == [2, 3]
+
+
+@pytest.mark.unit
+def test_inprocess_contract_failure_retries(
+    set_llm_env: None, tmp_path
+) -> None:
+    _ = set_llm_env
+    data_path = tmp_path / "data.csv"
+    pd.DataFrame({"value": [1, 2]}).to_csv(data_path, index=False)
+    unit = PlanUnit(
+        unit_id=1,
+        purpose="double value",
+        unit_type="transform",
+        input_columns=["value"],
+        output_columns=["doubled"],
+    )
+    wrong = (
+        "def _unit(df, input_columns, params):\n"
+        "    return {'columns': {'wrong': df[input_columns[0]]}, 'artifacts': []}\n"
+    )
+    fixed = (
+        "def _unit(df, input_columns, params):\n"
+        "    return {'columns': {'doubled': df[input_columns[0]] * 2}, "
+        "'artifacts': []}\n"
+    )
+    llm = MagicMock()
+    llm.invoke.side_effect = [MagicMock(content=wrong), MagicMock(content=fixed)]
+
+    with patch("src.agent.nodes.analysis.get_llm", return_value=llm):
+        result = _execute_inprocess_llm(unit, str(data_path), str(tmp_path / "out"))
+
+    assert result["status"] == "success"
+    assert result["retry_count"] == 1
+    assert llm.invoke.call_count == 2
+
+
 @pytest.mark.unit
 def test_analysis_node_single_unit_success(
     set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
     _ = set_llm_env
-
-    valid_script = (
-        "import sys; print('"
-        '{"charts": ["out/chart1.png"],'
-        ' "statistics": {"correlations": {"sales_revenue": 0.85}},'
-        ' "insights": ["Sales correlates with revenue"]}'
-        "')"
-    )
-    sandbox_result = SandboxResult(
-        stdout='{"charts": ["out/chart1.png"], '
-        '"statistics": {"correlations": {"sales_revenue": 0.85}}, '
-        '"insights": ["Sales correlates with revenue"]}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
-
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = valid_script
-    mock_llm.invoke.return_value = mock_response
 
     state = AgentState(
         file_path="/tmp/test.csv",
@@ -129,9 +232,9 @@ def test_analysis_node_single_unit_success(
         plan=sample_plan,
     )
 
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch("src.agent.nodes.analysis.run_script", return_value=sandbox_result),
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        return_value=_mock_inprocess_success(1, "/tmp/out/unit_1"),
     ):
         new_state = analysis_node(state)
 
@@ -155,23 +258,10 @@ def test_analysis_node_multi_unit_all_succeed(
 
     call_count = [0]
 
-    def _make_response():
+    def _make_result(unit, data_path, output_dir, retry_state=None):
         call_count[0] += 1
         uid = call_count[0]
-        content = (
-            'import sys; print(\''
-            f'{{"charts": ["out/unit{uid}_chart.png"],'
-            f' "statistics": {{"r{uid}": 0.{uid * 10}}},'
-            f' "insights": ["Unit {uid} insight"]}}\''
-            ')'
-        )
-        return content
-
-    def _make_sandbox_result(stdout):
-        return SandboxResult(stdout=stdout, stderr="", exit_code=0, timed_out=False)
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.side_effect = lambda prompt: MagicMock(content=_make_response())
+        return _mock_inprocess_success(uid, output_dir)
 
     state = AgentState(
         file_path="/tmp/test.csv",
@@ -179,14 +269,9 @@ def test_analysis_node_multi_unit_all_succeed(
         plan=sample_plan_multi,
     )
 
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch(
-            "src.agent.nodes.analysis.run_script",
-            side_effect=lambda script_path, args, **kwargs: _make_sandbox_result(
-                '{"charts": ["out/chart.png"], "statistics": {}, "insights": ["ok"]}'
-            ),
-        ),
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        side_effect=_make_result,
     ):
         new_state = analysis_node(state)
 
@@ -194,8 +279,6 @@ def test_analysis_node_multi_unit_all_succeed(
     result = new_state["analysis_result"]
     assert result["status"] == "complete"
     assert len(result["unit_results"]) == 3
-    unit_ids = [ur["unit_id"] for ur in result["unit_results"]]
-    assert unit_ids == [1, 2, 3]
     for ur in result["unit_results"]:
         assert ur["status"] == "success"
 
@@ -206,21 +289,16 @@ def test_analysis_node_mixed_success(
 ) -> None:
     _ = set_llm_env
 
-    def _make_sandbox_result(script_path, args, **kwargs):
-        # Unit 2 always fails (script_path contains "u2_")
-        if "u2_" in str(script_path):
-            return SandboxResult(
-                stdout="", stderr="ValueError: bad data", exit_code=1, timed_out=False
-            )
-        return SandboxResult(
-            stdout='{"charts": [], "statistics": {}, "insights": ["ok"]}',
-            stderr="",
-            exit_code=0,
-            timed_out=False,
-        )
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content="print('{}')\n")
+    def _make_result(unit, data_path, output_dir, retry_state=None):
+        if unit.unit_id == 2:
+            return {
+                "unit_id": 2, "status": "failed",
+                "parsed_output": None, "charts": [], "insights": [],
+                "statistics": {}, "error": "ValueError: bad data",
+                "retry_count": 3, "scripts": [], "stdout": "",
+                "output_dir": output_dir,
+            }
+        return _mock_inprocess_success(unit.unit_id, output_dir)
 
     state = AgentState(
         file_path="/tmp/test.csv",
@@ -228,16 +306,15 @@ def test_analysis_node_mixed_success(
         plan=sample_plan_multi,
     )
 
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch("src.agent.nodes.analysis.run_script", side_effect=_make_sandbox_result),
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        side_effect=_make_result,
     ):
         new_state = analysis_node(state)
 
     assert "error" in new_state
     result = new_state["analysis_result"]
     assert result["status"] == "partial"
-    assert len(result["unit_results"]) == 3
     successes = [ur for ur in result["unit_results"] if ur["status"] == "success"]
     failures = [ur for ur in result["unit_results"] if ur["status"] == "failed"]
     assert len(successes) == 2
@@ -252,40 +329,29 @@ def test_analysis_node_per_unit_react_retry(
 
     call_count = [0]
 
-    def _make_sandbox_result(script_path, args, **kwargs):
+    def _make_result(unit, data_path, output_dir, retry_state=None):
         call_count[0] += 1
-        if call_count[0] < 3:
-            return SandboxResult(
-                stdout="", stderr="ValueError: try again", exit_code=1, timed_out=False
-            )
-        return SandboxResult(
-            stdout='{"charts": [], "statistics": {}, "insights": ["finally works"]}',
-            stderr="",
-            exit_code=0,
-            timed_out=False,
-        )
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content="print('{}')\n")
+        return {
+            "unit_id": unit.unit_id, "status": "success",
+            "parsed_output": {}, "charts": [], "insights": ["finally works"],
+            "statistics": {}, "error": None, "retry_count": 2,
+            "scripts": [], "stdout": "", "output_dir": output_dir,
+        }
 
     state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
+        file_path="/tmp/test.csv", user_requirement="Analyze", plan=sample_plan,
     )
 
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch("src.agent.nodes.analysis.run_script", side_effect=_make_sandbox_result),
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        side_effect=_make_result,
     ):
         new_state = analysis_node(state)
 
     assert new_state.get("error") is None
     ur = new_state["analysis_result"]["unit_results"][0]
     assert ur["status"] == "success"
-    assert ur["retry_count"] == 2
     assert ur["insights"] == ["finally works"]
-    assert mock_llm.invoke.call_count == 3
 
 
 @pytest.mark.unit
@@ -294,29 +360,27 @@ def test_analysis_node_all_fail(
 ) -> None:
     _ = set_llm_env
 
-    sandbox_result = SandboxResult(
-        stdout="", stderr="RuntimeError: crash", exit_code=1, timed_out=False
-    )
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content="print('{}')\n")
+    def _make_result(unit, data_path, output_dir, retry_state=None):
+        return {
+            "unit_id": unit.unit_id, "status": "failed",
+            "parsed_output": None, "charts": [], "insights": [],
+            "statistics": {}, "error": "RuntimeError: crash",
+            "retry_count": 3, "scripts": [], "stdout": "",
+            "output_dir": output_dir,
+        }
 
     state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
+        file_path="/tmp/test.csv", user_requirement="Analyze", plan=sample_plan,
     )
 
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch("src.agent.nodes.analysis.run_script", return_value=sandbox_result),
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        side_effect=_make_result,
     ):
         new_state = analysis_node(state)
 
     assert "error" in new_state
-    result = new_state["analysis_result"]
-    assert result["status"] == "partial"
-    ur = result["unit_results"][0]
+    ur = new_state["analysis_result"]["unit_results"][0]
     assert ur["status"] == "failed"
     assert ur["retry_count"] == 3
 
@@ -325,122 +389,105 @@ def test_analysis_node_all_fail(
 def test_analysis_node_invalid_json_output(
     set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
+    """In-process LLM returns a plain dict — no JSON to parse, always valid."""
     _ = set_llm_env
 
-    bad_result = SandboxResult(
-        stdout="Analysis done\nbut no JSON here!",
-        stderr="",
-        exit_code=0,
-        timed_out=False,
-    )
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content="print('no json')\n")
-
     state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
+        file_path="/tmp/test.csv", user_requirement="Analyze", plan=sample_plan,
     )
 
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch("src.agent.nodes.analysis.run_script", return_value=bad_result),
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        return_value=_mock_inprocess_success(1, "/tmp/out/unit_1"),
     ):
         new_state = analysis_node(state)
 
-    assert "error" in new_state
-    result = new_state["analysis_result"]
-    assert result["status"] == "partial"
-    ur = result["unit_results"][0]
-    assert ur["status"] == "failed"
+    assert new_state.get("error") is None
 
 
 @pytest.mark.unit
 def test_analysis_node_timeout_handling(
     set_llm_env: None, temp_output_dir: str, sample_plan: object
 ) -> None:
+    """Transform/Filter LLM is in-process — no subprocess, no timeout."""
     _ = set_llm_env
 
-    timeout_result = SandboxResult(
-        stdout="partial...",
-        stderr="",
-        exit_code=-1,
-        timed_out=True,
-    )
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content="print('slow')\n")
-
     state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
+        file_path="/tmp/test.csv", user_requirement="Analyze", plan=sample_plan,
     )
 
-    with (
-        patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm),
-        patch("src.agent.nodes.analysis.run_script", return_value=timeout_result),
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        return_value=_mock_inprocess_success(1, "/tmp/out/unit_1"),
     ):
         new_state = analysis_node(state)
 
-    assert "error" in new_state
-    result = new_state["analysis_result"]
-    ur = result["unit_results"][0]
-    assert ur["status"] == "failed"
+    assert new_state.get("error") is None
 
 
 @pytest.mark.unit
 def test_analysis_node_llm_error(set_llm_env: None, sample_plan: object) -> None:
     _ = set_llm_env
 
-    mock_llm = MagicMock()
-    mock_llm.invoke.side_effect = RuntimeError("API rate limit")
+    def _make_result(unit, data_path, output_dir, retry_state=None):
+        return {
+            "unit_id": unit.unit_id, "status": "failed",
+            "parsed_output": None, "charts": [], "insights": [],
+            "statistics": {}, "error": "LLM error: API rate limit",
+            "retry_count": 3, "scripts": [], "stdout": "",
+            "output_dir": output_dir,
+        }
 
     state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
+        file_path="/tmp/test.csv", user_requirement="Analyze", plan=sample_plan,
     )
 
-    with patch("src.agent.nodes.analysis.get_llm", return_value=mock_llm):
+    with patch(
+        "src.agent.nodes.analysis._execute_inprocess_llm",
+        side_effect=_make_result,
+    ):
         new_state = analysis_node(state)
 
     assert "error" in new_state
-    result = new_state["analysis_result"]
-    ur = result["unit_results"][0]
+    ur = new_state["analysis_result"]["unit_results"][0]
     assert ur["status"] == "failed"
 
 
-# --- M4: Timeout Configuration Tests ---
+# --- M4: Timeout Configuration Tests (Terminal subprocess only) ---
 
 
 @pytest.mark.unit
 def test_analysis_unit_uses_configured_timeout(
-    set_llm_env: None, temp_output_dir: str, sample_plan: object, monkeypatch: object
+    set_llm_env: None, temp_output_dir: str, monkeypatch: object
 ) -> None:
-    _ = set_llm_env
+    """Terminal units still use subprocess — timeout config applies."""
+    from src.agent.state import Plan, PlanUnit
 
+    _ = set_llm_env
     monkeypatch.setenv("DATAINSIGHT_TIMEOUT_ANALYSIS", "90")
     import importlib
 
-    import src.agent.nodes.analysis as an_mod
+    import src.agent.nodes.analysis as an_mod  # noqa: I001
     importlib.reload(an_mod)
+
+    terminal_plan = Plan(
+        units=[
+            PlanUnit(unit_id=1, purpose="scatter", unit_type="terminal",
+                     model_hint="auto", cautious=""),
+        ],
+        alignment_notes="terminal test",
+    )
 
     sandbox_result = SandboxResult(
         stdout='{"charts": [], "statistics": {}, "insights": ["ok"]}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
+        stderr="", exit_code=0, timed_out=False,
     )
 
     mock_llm = MagicMock()
     mock_llm.invoke.return_value = MagicMock(content="print('{}')\n")
 
     state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
+        file_path="/tmp/test.csv", user_requirement="Analyze", plan=terminal_plan,
     )
 
     with (
@@ -455,30 +502,35 @@ def test_analysis_unit_uses_configured_timeout(
 
 @pytest.mark.unit
 def test_analysis_unit_timeout_env_fallback(
-    set_llm_env: None, temp_output_dir: str, sample_plan: object, monkeypatch: object
+    set_llm_env: None, temp_output_dir: str, monkeypatch: object
 ) -> None:
-    _ = set_llm_env
+    from src.agent.state import Plan, PlanUnit
 
+    _ = set_llm_env
     monkeypatch.setenv("DATAINSIGHT_TIMEOUT_ANALYSIS", "invalid")
     import importlib
 
-    import src.agent.nodes.analysis as an_mod
+    import src.agent.nodes.analysis as an_mod  # noqa: I001
     importlib.reload(an_mod)
+
+    terminal_plan = Plan(
+        units=[
+            PlanUnit(unit_id=1, purpose="scatter", unit_type="terminal",
+                     model_hint="auto", cautious=""),
+        ],
+        alignment_notes="terminal test",
+    )
 
     sandbox_result = SandboxResult(
         stdout='{"charts": [], "statistics": {}, "insights": ["ok"]}',
-        stderr="",
-        exit_code=0,
-        timed_out=False,
+        stderr="", exit_code=0, timed_out=False,
     )
 
     mock_llm = MagicMock()
     mock_llm.invoke.return_value = MagicMock(content="print('{}')\n")
 
     state = AgentState(
-        file_path="/tmp/test.csv",
-        user_requirement="Analyze",
-        plan=sample_plan,
+        file_path="/tmp/test.csv", user_requirement="Analyze", plan=terminal_plan,
     )
 
     with (
@@ -496,7 +548,7 @@ def test_analysis_unit_timeout_env_fallback(
 
 
 @pytest.mark.unit
-def test_build_code_prompt_transform_has_row_invariant() -> None:
+def test_build_inprocess_prompt_transform_has_row_invariant() -> None:
     from src.agent.state import PlanUnit
 
     unit = PlanUnit(
@@ -504,15 +556,15 @@ def test_build_code_prompt_transform_has_row_invariant() -> None:
         model_hint="auto", cautious="", input_columns=["a", "b"],
         output_columns=["c"], related_fields=["a", "b"],
     )
-    prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out")
+    prompt = _build_inprocess_prompt(unit)
     assert "UNIT TYPE: TRANSFORM" in prompt
     assert "Row count MUST NOT change" in prompt
-    assert "output.csv" in prompt
-    assert "columns" in prompt.lower()
+    assert "pandas_series" in prompt
+    assert "Do NOT write output.csv" in prompt
 
 
 @pytest.mark.unit
-def test_build_code_prompt_filter_has_column_invariant() -> None:
+def test_build_inprocess_prompt_filter_has_column_invariant() -> None:
     from src.agent.state import PlanUnit
 
     unit = PlanUnit(
@@ -520,11 +572,11 @@ def test_build_code_prompt_filter_has_column_invariant() -> None:
         model_hint="auto", cautious="", input_columns=["date"],
         output_columns=[], related_fields=["date"],
     )
-    prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out")
+    prompt = _build_inprocess_prompt(unit)
     assert "UNIT TYPE: FILTER" in prompt
     assert "Column set MUST NOT change" in prompt
-    assert "output.csv" in prompt
-    assert "row_count_before" in prompt
+    assert "filtered_df" in prompt
+    assert "snapshot_name" in prompt
 
 
 @pytest.mark.unit
@@ -547,14 +599,14 @@ def test_build_react_fix_prompt_has_type_rules() -> None:
     from src.agent.state import PlanUnit
 
     unit = PlanUnit(
-        unit_id=1, purpose="add column", unit_type="transform",
+        unit_id=1, purpose="plot", unit_type="terminal",
         model_hint="auto", cautious="", input_columns=["a", "b"],
-        output_columns=["c"], related_fields=["a", "b"],
+        output_columns=[], related_fields=["a", "b"],
     )
     prompt = _build_unit_react_fix_prompt(
         unit, "bad code", "some error", "/tmp/data.csv", "/tmp/out",
     )
-    assert "UNIT TYPE: TRANSFORM" in prompt
+    assert "UNIT TYPE: TERMINAL" in prompt
     assert "FIXED" in prompt
     assert "bad code" in prompt
     assert "some error" in prompt
@@ -625,25 +677,24 @@ def test_build_unit_code_prompt_with_upstream() -> None:
 
     unit = PlanUnit(
         unit_id=2,
-        purpose="聚类分析",
+        purpose="聚类结果图",
+        unit_type="terminal",
         model="KMeans",
         cautious="",
         depends_on=[1],
         input_columns=["sales_log"],
-        output_columns=["Cluster"],
+        output_columns=[],
         related_fields=[],
     )
-    upstream = "Input columns available: sales_log\nExpected output columns to produce: Cluster"
+    upstream = "Input columns available: sales_log"
     prompt = _build_unit_code_prompt(unit, "/tmp/data.csv", "/tmp/out", upstream_context=upstream)
 
     assert "UPSTREAM DATA" in prompt
     assert "sales_log" in prompt
-    assert "Cluster" in prompt
     assert "already contains columns produced by previous" in prompt.lower()
     assert "do NOT overwrite them" in prompt
-    # Rules 14 and 15
     assert "output.csv" in prompt
-    assert "to_csv(index=False)" in prompt
+    assert "Do NOT save output.csv" in prompt
 
 
 @pytest.mark.unit

@@ -1,6 +1,6 @@
 # Plan: DAG-Native Executor — Milestone 1
 
-**Source PRD**: `.claude/prds/cycle-4-dag-executor.prd.md`
+**Source PRD**: `../prds/cycle-4-dag-executor.prd.md`
 **Selected Milestone**: 1 — PlanUnit model refactor + DAG engine overhaul
 **Complexity**: Large
 
