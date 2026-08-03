@@ -37,6 +37,12 @@ async def send_message(
     updated = store.get(session_id)
     assert updated is not None
 
+    history = list(updated.dialogue_history or [])
+    history.append({"role": "user", "content": updated.user_requirement})
+    store.update(session_id, {"dialogue_history": history})
+    updated = store.get(session_id)
+    assert updated is not None
+
     result, bt_meta = business_track_node(updated)
     if "error" in result:
         raise HTTPException(400, str(result["error"]))
@@ -52,7 +58,7 @@ async def send_message(
 
     # Append BT response to dialogue history
     bt_response: str = str(bt_meta.get("_bt_response", ""))
-    history: list[dict[str, str]] = list(updated.dialogue_history or [])
+    history = list(updated.dialogue_history or [])
     if bt_response:
         history.append({"role": "assistant", "content": bt_response})
         state_update["dialogue_history"] = history
@@ -72,13 +78,15 @@ async def send_message(
             action="confirm",
             message=bt_response,
             instruction=inst_dict,
-            is_contextualized=final.plan is not None and bool(final.unified_columns),
+            is_contextualized=final.plan is not None
+            and bool(final.unified_columns or final.snapshot_registry),
         )
 
     return DialogueResponse(
         action="chat",
         message=bt_response,
-        is_contextualized=final.plan is not None and bool(final.unified_columns),
+        is_contextualized=final.plan is not None
+        and bool(final.unified_columns or final.snapshot_registry),
     )
 
 

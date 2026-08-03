@@ -14,6 +14,10 @@ _INSPECTION_SCRIPT = os.path.join(
 )
 
 
+class DataTrackError(ValueError):
+    """Raised when deterministic source inspection cannot produce a profile."""
+
+
 def _parse_data_profile(inspection_json: str) -> DataProfile:
     """Parse inspection script output into a structured DataProfile."""
     raw = json.loads(inspection_json)
@@ -40,6 +44,22 @@ def _parse_data_profile(inspection_json: str) -> DataProfile:
     )
 
 
+def inspect_file(file_path: str) -> DataProfile:
+    """Run deterministic inspection for one CSV or Excel source."""
+    logger.info("Data Track: inspecting %s", file_path)
+    result: SandboxResult = run_script(_INSPECTION_SCRIPT, [file_path])
+
+    if result.exit_code != 0:
+        logger.error("Inspection script failed: %s", result.stderr)
+        raise DataTrackError(f"Inspection script error: {result.stderr}")
+
+    try:
+        return _parse_data_profile(result.stdout)
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        logger.error("Failed to parse inspection output: %s", exc)
+        raise DataTrackError(f"Failed to parse inspection output: {exc}") from exc
+
+
 def data_track_node(state: AgentState) -> dict[str, object]:
     """Stage 1 — Data Track: deterministic inspection → structured profile
     and unified column list extraction.
@@ -47,20 +67,10 @@ def data_track_node(state: AgentState) -> dict[str, object]:
     Reads: state.file_path
     Writes: state.data_profile, state.unified_columns
     """
-    file_path = state.file_path
-    logger.info("Data Track: inspecting %s", file_path)
-
-    result: SandboxResult = run_script(_INSPECTION_SCRIPT, [file_path])
-
-    if result.exit_code != 0:
-        logger.error("Inspection script failed: %s", result.stderr)
-        return {"error": f"Inspection script error: {result.stderr}"}
-
     try:
-        data_profile = _parse_data_profile(result.stdout)
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.error("Failed to parse inspection output: %s", e)
-        return {"error": f"Failed to parse inspection output: {e}"}
+        data_profile = inspect_file(state.file_path)
+    except DataTrackError as exc:
+        return {"error": str(exc)}
 
     unified_columns = [col.name for col in data_profile.columns]
     logger.info(

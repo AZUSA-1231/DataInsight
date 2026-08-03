@@ -40,6 +40,14 @@ def _serialize_analysis_result(analysis_result: dict[str, object]) -> str:
                 "statistics": ur.get("statistics", {}),
                 "error": ur.get("error"),
                 "retry_count": ur.get("retry_count"),
+                "stale": ur.get("stale", False),
+                "run_id": ur.get("run_id"),
+                "input_checkpoint_ids": ur.get("input_checkpoint_ids", []),
+                "output_checkpoint_id": ur.get("output_checkpoint_id"),
+                "row_count_before": ur.get("row_count_before"),
+                "row_count_after": ur.get("row_count_after"),
+                "row_count_delta": ur.get("row_count_delta"),
+                "warnings": ur.get("warnings", []),
             })
         return json.dumps(
             {"status": analysis_result.get("status"), "unit_results": summary},
@@ -57,6 +65,7 @@ def _build_full_report_prompt(
     alignment_notes: str,
     analysis_result_json: str,
     user_requirement: str,
+    runtime_context_json: str = "{}",
 ) -> str:
     return f"""You are a senior data analysis report writer. Assemble a comprehensive,
 reader-friendly Markdown report from the structured analysis outputs below.
@@ -69,7 +78,10 @@ CRITICAL RULES:
 5. Be honest about limitations — do not exaggerate confidence.
 6. Section 2: write ONE subsection (### 2.{{N}}) per analysis unit. Each unit in
    ANALYSIS RESULTS maps to exactly one subsection. Include findings, charts,
-   key statistics, and any errors/warnings for that unit.
+  key statistics, and any errors/warnings for that unit.
+8. Explicitly disclose each structured JOIN_* warning, row-count expansion or
+   unmatched-key limitation. Mark stale units as not current and do not present
+   their outputs as final evidence.
 7. For EACH chart listed in a unit's results, embed it using Markdown image
    syntax: `![what the chart shows](charts/unit_N_filename.png)`. The chart
    filenames are already in the ANALYSIS RESULTS — use them exactly as provided.
@@ -144,6 +156,12 @@ of what each shows. Use `- **filename.png**: description` format.
 **USER'S ORIGINAL QUESTION:**
 
 {user_requirement}
+
+---
+
+**V2 SNAPSHOT, CHECKPOINT, AND COLUMN LINEAGE CONTEXT (JSON):**
+
+{runtime_context_json}
 """
 
 
@@ -154,6 +172,7 @@ def _build_partial_report_prompt(
     error_message: str,
     user_requirement: str,
     plan_units_json: str = "[]",
+    runtime_context_json: str = "{}",
 ) -> str:
     return f"""You are a senior data analysis report writer. The analysis pipeline
 encountered an ERROR during the execution phase. Generate a PARTIAL report with
@@ -164,6 +183,8 @@ CRITICAL RULES:
 2. Explain what failed in plain language so a non-technical reader understands.
 3. The "数据与业务对齐备忘" section is STILL mandatory.
 4. Embed charts (if any were generated before the failure) with `![desc](charts/filename.png)`.
+5. Mention any retained checkpoints, stale units, Join warnings, or row-count
+   limitations present in the v2 runtime context.
 
 Report structure:
 
@@ -215,7 +236,72 @@ What the user can do next.
 **USER'S ORIGINAL QUESTION:**
 
 {user_requirement}
+
+---
+
+**V2 SNAPSHOT, CHECKPOINT, AND COLUMN LINEAGE CONTEXT (JSON):**
+
+{runtime_context_json}
 """
+
+
+def _build_v2_report_context(state: AgentState) -> str:
+    """Serialize durable multi-source and lineage context for report writing."""
+    sources: list[dict[str, object]] = []
+    for source in sorted(state.data_sources, key=lambda item: item.display_name):
+        snapshot = state.snapshot_registry.get(source.snapshot_id)
+        sources.append(
+            {
+                "source_id": source.source_id,
+                "snapshot_id": source.snapshot_id,
+                "snapshot": snapshot.name if snapshot else None,
+                "display_name": source.display_name,
+                "profile": source.profile.model_dump(mode="json"),
+            }
+        )
+
+    snapshots: list[dict[str, object]] = []
+    lineage: list[dict[str, object]] = []
+    for snapshot in sorted(state.snapshot_registry.values(), key=lambda item: item.name):
+        checkpoint = state.checkpoint_registry.get(snapshot.current_checkpoint_id)
+        if checkpoint is None:
+            continue
+        snapshots.append(
+            {
+                "snapshot": snapshot.name,
+                "snapshot_id": snapshot.snapshot_id,
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "row_count": checkpoint.row_count,
+                "producer_unit_id": snapshot.created_by_unit_id,
+                "parent_snapshots": snapshot.parent_snapshot_ids,
+                "column_refs": list(checkpoint.columns),
+            }
+        )
+        for ref, node_id in checkpoint.columns.items():
+            node = state.column_graph.nodes.get(node_id)
+            if node is None:
+                continue
+            lineage.append(
+                {
+                    "ref": ref,
+                    "snapshot": snapshot.name,
+                    "dtype": node.dtype,
+                    "source_column": node.source_column,
+                    "origin_refs": list(node.origin_columns),
+                    "derived_from": [
+                        state.column_graph.nodes[parent_id].ref
+                        for parent_id in node.derived_from_node_ids
+                        if parent_id in state.column_graph.nodes
+                    ],
+                    "created_by_unit_id": node.created_by_unit_id,
+                }
+            )
+
+    return json.dumps(
+        {"sources": sources, "snapshots": snapshots, "lineage": lineage},
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def report_gen_node(state: AgentState) -> dict[str, object]:
@@ -236,6 +322,8 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
     intent_json = analysis_intent.model_dump_json(indent=2) if analysis_intent else "{}"
     alignment_notes = state.plan.alignment_notes if state.plan else "无"
 
+    runtime_context_json = _build_v2_report_context(state)
+
     has_results = bool(
         analysis_result.get("unit_results") or analysis_result.get("parsed_output")
     )
@@ -249,6 +337,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
             alignment_notes,
             result_json,
             user_requirement,
+            runtime_context_json,
         )
     else:
         logger.info("Report Gen: assembling partial report (analysis failed or missing)")
@@ -267,6 +356,7 @@ def report_gen_node(state: AgentState) -> dict[str, object]:
             error_msg,
             user_requirement,
             plan_units_json,
+            runtime_context_json,
         )
 
     try:

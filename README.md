@@ -13,22 +13,25 @@ data contract.
 
 ```text
 START
-  -> data_track       deterministic profile and unified columns
-  -> business_track   workspace-aware business instruction
-  -> planner          validated Plan with DAG units
-  -> analysis         topological unit execution and checkpoints
-  -> report_gen       Markdown report and alignment notes
+  -> data_track       deterministic inspection for the graph launcher
+  -> business_track   Snapshot-aware business instruction
+  -> planner          validated operation-specific Plan v2
+  -> analysis         Snapshot/Checkpoint DAG execution
+  -> report_gen       Markdown report with lineage and warnings
   -> END
 
 feedback -> business_track -> planner -> analysis -> report_gen
 ```
 
-Analysis units use one of three contracts:
+The API and browser workflow additionally normalize each uploaded source to
+Parquet and register its Source, Snapshot, Checkpoint, and Column Graph nodes.
+Analysis units use one of four v2 contracts:
 
 | Unit | Contract | Execution |
 |---|---|---|
-| Transform | add declared columns, preserve row identity | template or restricted generated function |
-| Filter | return a named subset snapshot, preserve columns | template or restricted generated function |
+| Derive | add one declared column, preserve row identity | template or restricted generated function |
+| Filter | return a named subset Snapshot, preserve columns | template or restricted generated function |
+| Join | select aliased columns from two Snapshots | deterministic pandas executor |
 | Terminal | produce charts or other artifacts | template or subprocess sandbox |
 
 Data moves between units through Parquet checkpoints. Runtime session state is
@@ -44,24 +47,15 @@ pip install -e ".[dev,web]"
 uvicorn src.api.app:app --reload
 ```
 
-Open `http://127.0.0.1:8000`. The zero-build frontend supports upload, field
-selection, workspace editing, dialogue, execution, dashboard pins, and report
-generation. The active session is restored after a server or browser restart.
+Open `http://127.0.0.1:8000`. The zero-build frontend supports multi-file
+upload, source/Snapshot grouping, qualified-column selection,
+operation-specific workspace editing, dialogue, execution, warning and
+stale-state display, rerun, dashboard pins, and report generation. The active
+session is restored after a server or browser restart.
 
-## CLI
-
-```bash
-pip install -e ".[dev]"
-python -m src sales.csv "Why did Q2 sales drop?"
-```
-
-Useful options:
-
-| Flag | Purpose |
-|---|---|
-| `-o`, `--output` | Markdown output path |
-| `-s`, `--save-intermediates` | Save prompts, scripts, and charts |
-| `-v`, `--verbose` | Enable debug logging |
+The web workspace is the supported application surface. The former one-file
+CLI was retired because it could not provide the same Snapshot, Checkpoint,
+and column-first editing model as the browser.
 
 ## LLM Configuration
 
@@ -85,8 +79,8 @@ ruff check .
 mypy src/
 ```
 
-The Cycle 4 closure baseline is 269 passing tests, clean Ruff output, and clean
-strict mypy output.
+Cycle 5 validation evidence is recorded in
+`docs/cycles/cycle-5-column-lineage/summary.md`.
 
 ## Repository Map
 
@@ -97,7 +91,8 @@ src/sandbox/            deterministic inspection and terminal subprocess runner
 static/                 zero-build browser workspace
 tests/                  unit, integration, and API tests
 docs/                   current product, architecture, and roadmap documents
-.claude/archive/        historical Cycle 1-4 development artifacts
+docs/cycles/            cycle summaries and archived PRDs/plans
+.claude/archive/        historical Cycle 1-4 Claude Code artifacts
 ```
 
 ## Security Boundary

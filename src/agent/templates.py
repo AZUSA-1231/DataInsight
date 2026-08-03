@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.agent.state import ExecutionMode, PlanUnit, UnitType
+from src.agent.state import ExecutionMode, PlanUnitLike, UnitType
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,18 @@ def filter_by_date(
     end = params.get("end")
     snapshot_name = params.get("snapshot_name", "filtered")
 
+    condition = params.get("condition")
+    if isinstance(condition, str) and condition.strip():
+        try:
+            filtered = df.query(condition, engine="python")
+        except Exception as exc:
+            raise ValueError(f"Invalid filter condition: {exc}") from exc
+        return {
+            "filtered_df": filtered.copy(),
+            "snapshot_name": snapshot_name,
+            "artifacts": [],
+        }
+
     if start is None and end is None:
         raise ValueError("filter_by_date requires at least one of 'start' or 'end'")
 
@@ -217,7 +229,7 @@ TEMPLATE_REGISTRY: dict[str, TemplateFunc] = {
 
 
 def dispatch(
-    unit: PlanUnit, df: pd.DataFrame, output_dir: str
+    unit: PlanUnitLike, df: pd.DataFrame, output_dir: str
 ) -> dict[str, Any] | None:
     """Route a PlanUnit to its template or signal fall-through to LLM path.
 
@@ -266,7 +278,7 @@ def dispatch(
         )
 
 def _build_template_result(
-    unit: PlanUnit,
+    unit: PlanUnitLike,
     template_output: dict[str, Any],
     output_dir: str,
     df: pd.DataFrame | None = None,
@@ -329,7 +341,7 @@ def _build_template_result(
 
 
 def _validate_template_output(
-    unit: PlanUnit,
+    unit: PlanUnitLike,
     output: dict[str, Any],
     df: pd.DataFrame | None,
 ) -> None:
@@ -401,7 +413,7 @@ def _validate_template_output(
         raise TemplateContractError("Terminal units cannot produce data columns")
 
 
-def _error_result(unit: PlanUnit, message: str) -> dict[str, Any]:
+def _error_result(unit: PlanUnitLike, message: str) -> dict[str, Any]:
     """Build a failed result dict for template errors."""
     return {
         "unit_id": unit.unit_id,

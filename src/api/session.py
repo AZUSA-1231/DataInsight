@@ -14,6 +14,18 @@ from src.agent.state import AgentState
 _SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
+class IncompatibleSessionError(RuntimeError):
+    """Raised when a persisted Session is from an unsupported schema version."""
+
+    def __init__(self, session_id: str, version: object) -> None:
+        self.session_id = session_id
+        self.version = version
+        super().__init__(
+            f"Session {session_id} uses incompatible schema version {version!r}; "
+            "Cycle 5 requires schema version 2"
+        )
+
+
 class SessionStore:
     """Session storage with an in-memory cache and JSON persistence."""
 
@@ -38,6 +50,8 @@ class SessionStore:
             return state
         try:
             return self.load(session_id)
+        except IncompatibleSessionError:
+            raise
         except (FileNotFoundError, ValueError, json.JSONDecodeError):
             return None
 
@@ -73,6 +87,8 @@ class SessionStore:
         """Load a persisted session into the in-memory cache."""
         state_path = self._session_dir(session_id) / "state.json"
         payload = json.loads(state_path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != 2:
+            raise IncompatibleSessionError(session_id, payload.get("schema_version"))
         state = AgentState.model_validate(payload)
         self._sessions[session_id] = state
         return state

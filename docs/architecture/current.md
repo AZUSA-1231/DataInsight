@@ -1,8 +1,12 @@
 # Current Architecture
 
-## Pipeline
+DataInsight is a local, single-user analysis workspace. Data inspection,
+business reasoning, planning, execution, and reporting remain separate stages;
+the browser is not a generic chat-to-code surface.
 
-LangGraph orchestrates five state transitions:
+## Runtime Flow
+
+The planner-driven workflow used by the browser API is:
 
 ```text
 data_track -> business_track -> planner -> analysis -> report_gen
@@ -10,75 +14,117 @@ data_track -> business_track -> planner -> analysis -> report_gen
                  +------------- feedback -----------+
 ```
 
-- `data_track` deterministically profiles one CSV or Excel file.
-- `business_track` converts dialogue plus the current workspace into a
-  `PlannerInstruction`.
-- `planner` is the only producer of the executable `Plan`.
-- `analysis` executes PlanUnits in topological levels, with parallel units
-  inside one level.
-- `report_gen` turns persisted results into a Markdown report with mandatory
-  data-business alignment notes.
-
-## Unit Contracts
-
-`PlanUnit` has three types and two execution modes.
-
-| Type | Durable effect | Hard invariant |
-|---|---|---|
-| Transform | adds declared columns to a checkpoint | same row count and index |
-| Filter | creates a named snapshot branch | same columns; indexed row subset |
-| Terminal | creates artifact files | no columns or snapshots |
-
-Template and generated Transform/Filter functions share the same return
-contract. Contract validation happens before a checkpoint is accepted.
-
-## Execution Boundaries
-
-- Template units run as trusted in-process functions.
-- Generated Transform/Filter units are statically checked, compiled with a
-  restricted namespace, and retried up to three times on compilation,
-  execution, or contract failure.
-- Generated Terminal units run as standalone subprocess scripts with a timeout.
-
-The in-process path is a trusted-local optimization, not an OS security
-sandbox. The API must not be exposed to untrusted users without a stronger
-worker isolation design.
-
-## Data Flow
-
-The executor does not concatenate unit CSV files. Each branch advances through
-complete Parquet checkpoints:
+The browser also exposes deterministic workspace operations directly:
 
 ```text
-checkpoints/wide_l0.parquet
-checkpoints/wide_l1.parquet
-checkpoints/snapshots/recent_l0.parquet
-checkpoints/snapshots/recent_l1.parquet
+upload source
+  -> profile + normalize to Parquet
+  -> register Source, Snapshot, Checkpoint, and raw Column Nodes
+  -> edit and validate a Plan v2
+  -> execute or rerun the DAG
+  -> inspect results, warnings, lineage, and report
 ```
 
-Terminal artifacts live in their unit output directory. Single-unit reruns
-resolve their input checkpoint from disk and either mark transitive dependents
-stale or rerun them as a cascade.
+Business Track and Planner receive the current source profiles and qualified
+columns grouped by Snapshot. Planner output is parsed through the same
+operation-specific Pydantic contract used by the workspace API.
 
-## Persistence
+## Durable State
 
-`SessionStore` keeps an in-memory cache backed by
-`data/sessions/{session_id}/state.json`. Creates and updates are saved
-atomically. A new process lazily loads a session on first access.
+`AgentState.schema_version` is `2`. The v2 state keeps these registries:
 
-Executor-only result keys beginning with `_`, including live DataFrames, are
-removed before JSON serialization. Durable source code, model names, insights,
-chart references, plans, pins, and reports remain in the state file.
+| Record | Responsibility |
+|---|---|
+| `DataSource` | Uploaded file, display name, profile, and source Snapshot/checkpoint references |
+| `SnapshotRecord` | Logical view, parent Snapshots, and current checkpoint head |
+| `CheckpointRecord` | Immutable Parquet result, parent checkpoints, row count, and qualified-column map |
+| `ColumnNode` | Concrete column version, source origin, direct parents, and creating unit |
 
-API execution output is stable under `data/output/{session_id}/analysis/`.
-Chart responses expose only paths relative to the session output root.
+Source ingestion accepts CSV and Excel files, creates an ASCII Snapshot name,
+adds hidden `__di_row_id` values, and writes a normalized source Parquet file
+below `data/output/{session_id}/sources/`. The hidden row ID is excluded from
+profiles, Planner context, and the browser.
+
+Checkpoint paths are relative to the session output root. Writes use a temporary
+file, read-back verification, and atomic replacement before the registry is
+updated. A missing or corrupt registered checkpoint is a mechanical execution
+error; the executor does not scan directories or fall back to the uploaded
+original file.
+
+## Plan v2
+
+`Plan.units` is a Pydantic discriminated union with `operation` as the
+discriminator:
+
+- `derive_column` adds one declared column to an existing Snapshot.
+- `filter` creates a named Snapshot containing a row subset.
+- `join` combines two Snapshots through the deterministic pandas executor.
+- `terminal` reads one Snapshot and produces analysis artifacts without a data
+  checkpoint.
+
+Units have stable positive integer IDs, explicit dependencies, and qualified
+column references such as `orders.price`. Validation is registry-aware and
+checks Snapshot/column references, output names, Join aliases and keys,
+dependency cycles, same-Snapshot writer chains, and the Terminal-leaf rule.
+Edits mark the changed unit and transitive dependents stale. Deletion never
+renumbers v2 units and requires explicit cascade deletion when dependents exist.
+
+## Execution Contracts
+
+The DAG scheduler executes independent topological levels in parallel while
+preserving explicit dependencies. A full run starts source Snapshots from
+their immutable source heads. Every successful Derive, Filter, or Join receives
+a new `run_id` and unique checkpoint ID, then advances the relevant Snapshot
+head and appends Column Graph nodes.
+
+Derive preserves row count, row order, and `__di_row_id`, and adds exactly one
+column. Filter preserves all columns and returns a subset of input row IDs.
+Join creates new row IDs and records one direct lineage parent for each selected
+output alias. Join execution is deterministic pandas code and never receives
+LLM-generated Join code. It supports `inner`, `left`, `right`, `outer`, `cross`,
+`semi`, and `anti` modes.
+
+Join cardinality, key dtype, and unmatched-key risks are structured warnings,
+not confirmation gates. The current warning codes are
+`JOIN_MANY_TO_MANY`, `JOIN_ROW_EXPANSION`, `JOIN_KEY_DTYPE_MISMATCH`, and
+`JOIN_UNMATCHED_KEYS`; warnings and row-count/statistics metadata are retained
+with the unit result.
+
+Template Derive/Filter units run in process. Generated Derive/Filter code is
+statically checked and executed through the restricted local function path.
+Generated Terminal analysis remains a timed subprocess path. These controls
+are appropriate for a trusted local demo, not an OS security sandbox for
+untrusted users.
+
+Single-unit reruns resolve recorded input checkpoint IDs, retain prior
+checkpoints and results in history, and create a new run. A non-cascade rerun
+marks transitive dependents stale; a cascade rerun executes the selected
+dependent chain using newly produced outputs.
 
 ## Interfaces
 
-- CLI: full graph execution plus interactive feedback.
-- FastAPI: session-scoped node and workspace endpoints.
-- Browser workspace: zero-build HTML/CSS/JS served by FastAPI.
+FastAPI exposes session, data, dialogue, workspace, execution, dashboard, and
+report routes. The data surface includes source/profile filtering, Snapshot
+heads, visible qualified columns, and public `/data/lineage` projections that
+hide internal column-node IDs. Execution responses expose run IDs, checkpoint
+references, row counts, warnings, stale state, and rerun results.
 
-The browser restores a session from the URL or local storage. A new session
-does not delete prior persisted work; an old session can be reopened with
-`/?session={session_id}`.
+The zero-build browser supports multi-file upload, source/Snapshot grouping,
+qualified-column drag and drop, operation-specific Derive/Filter/Join/Terminal
+forms, execution polling, warning display, stale/rerun controls, dashboards,
+and reports. Internal checkpoint IDs and column-node IDs are backend metadata,
+not editable frontend objects.
+
+`SessionStore` caches states in memory and atomically persists JSON under
+`data/sessions/{session_id}/state.json`. Executor-only result keys beginning
+with `_`, including live DataFrames, are removed before serialization. A state
+file without schema version 2 receives an explicit incompatible-session
+response and is not migrated or deleted.
+
+## Compatibility Boundary
+
+`file_path`, `data_profile`, `unified_columns`, and the `PlanUnit` model remain
+temporary Cycle 4 adapters for in-memory fixtures only. They are not v2
+sources of truth. API ingestion, Planner output, workspace writes, and DAG
+execution use the registries and operation-specific units. The former CLI is
+retired; new analysis starts in the browser workspace.

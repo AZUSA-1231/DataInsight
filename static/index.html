@@ -8,10 +8,9 @@
 </head>
 <body>
 
-<!-- Header -->
 <header id="header">
   <div class="header-logo">
-    <div class="icon">&#9650;</div>
+    <div class="icon" aria-hidden="true">DI</div>
     <span>DataInsight</span>
   </div>
   <div class="header-session">
@@ -21,76 +20,76 @@
   </div>
 </header>
 
-<!-- Left Panel: Data + Columns -->
 <aside id="panel-left">
-  <div class="section-title">Data Source</div>
-
-  <!-- Upload zone -->
+  <div class="section-title">Data Sources</div>
   <div class="upload-zone" id="upload-zone">
     <div id="upload-empty">
-      <div class="upload-icon">&#8627;</div>
-      <div class="upload-text">Drop CSV / Excel here</div>
-      <div class="upload-hint">or click to browse</div>
+      <div class="upload-icon" aria-hidden="true">+</div>
+      <div class="upload-text">Drop CSV / Excel files here</div>
+      <div class="upload-hint">or click to browse multiple files</div>
     </div>
     <div id="upload-file" class="hidden">
       <div class="upload-file-info">
-        <span class="upload-file-name" id="file-name"></span>
+        <span class="upload-file-name" id="file-name">Sources</span>
         <span class="upload-file-shape" id="file-shape"></span>
       </div>
     </div>
-    <input type="file" id="file-input" accept=".csv,.xlsx,.xls" hidden>
+    <input type="file" id="file-input" accept=".csv,.xlsx,.xls" multiple hidden>
     <div id="upload-error" class="upload-error hidden"></div>
   </div>
+  <div class="source-list" id="sources-list">
+    <div class="empty-state">Upload one or more files to create Snapshots.</div>
+  </div>
 
-  <div class="section-title">Columns</div>
+  <div class="section-title">Qualified Columns</div>
   <div class="column-list" id="column-list">
     <div class="empty-state">Upload a file to see columns</div>
   </div>
 </aside>
 
-<!-- Center Panel: Workspace + Dialogue + Results -->
 <main id="panel-center">
-  <!-- Workspace -->
-  <div class="section-title" style="padding-top:12px;">Workspace</div>
+  <div class="section-title workspace-title">Workspace</div>
   <div class="workspace-area" id="workspace-area">
-    <div class="empty-state" id="workspace-empty">No analysis units yet. Add one below or use AI to generate.</div>
+    <div class="empty-state" id="workspace-empty">Add an operation to build the analysis DAG.</div>
   </div>
-  <div style="padding: 0 14px 8px;">
-    <button class="btn-add-unit" id="btn-add-unit">+ Add Unit</button>
+  <div class="workspace-toolbar">
+    <select id="add-unit-operation" aria-label="Operation to add">
+      <option value="terminal">Terminal</option>
+      <option value="derive_column">Derive</option>
+      <option value="filter">Filter</option>
+      <option value="join">Join</option>
+    </select>
+    <button class="btn-add-unit" id="btn-add-unit">+ Add operation</button>
   </div>
 
-  <!-- Action bar -->
   <div class="action-bar">
     <button class="btn btn-primary" id="btn-generate-plan">Generate Plan</button>
     <button class="btn btn-primary" id="btn-execute">Execute</button>
     <span class="status-badge idle" id="exec-status-badge">idle</span>
-    <span id="exec-spinner" class="hidden" style="margin-left:4px;"><span class="spinner"></span></span>
+    <span id="exec-spinner" class="hidden"><span class="spinner"></span></span>
+    <span class="execution-summary" id="execution-summary"></span>
   </div>
 
-  <!-- Results -->
   <div class="results-area hidden" id="results-area">
-    <div class="section-title" style="padding:0 0 4px;">Results</div>
+    <div class="section-title results-title">Results</div>
     <div id="results-list"></div>
   </div>
 
-  <!-- Dialogue -->
   <div class="dialogue-area" id="dialogue-area">
     <div class="dialogue-messages" id="dialogue-messages">
       <div class="dialogue-msg assistant">
         <div class="sender">AI</div>
-        <div class="content">Hello! Upload a dataset and describe what analysis you need.</div>
+        <div class="content">Upload sources, then describe the analysis you need.</div>
       </div>
     </div>
     <div class="dialogue-input-row">
       <input type="text" class="dialogue-input" id="dialogue-input"
-             placeholder="Describe your analysis requirement..."
-             autocomplete="off">
+             placeholder="Describe your analysis requirement..." autocomplete="off">
       <button class="dialogue-send" id="dialogue-send">Send</button>
     </div>
   </div>
 </main>
 
-<!-- Right Panel: Dashboard + Report -->
 <aside id="panel-right">
   <div class="section-title">Dashboard</div>
   <div id="dashboard-area">
@@ -98,9 +97,8 @@
       <div class="empty-state" style="grid-column:1/-1;">Pin charts from execution results</div>
     </div>
   </div>
-
   <div class="report-area">
-    <button class="btn btn-secondary" id="btn-generate-report" style="width:100%;">Generate Report</button>
+    <button class="btn btn-secondary report-button" id="btn-generate-report">Generate Report</button>
     <div class="report-output hidden" id="report-output"></div>
   </div>
 </aside>

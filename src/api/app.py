@@ -6,11 +6,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import dashboard, data, dialogue, execution, report, workspace
 from src.api.schemas import SessionCreateRequest, SessionCreateResponse, SessionStateResponse
-from src.api.session import SessionStore
+from src.api.session import IncompatibleSessionError, SessionStore
 
 
 @asynccontextmanager
@@ -28,6 +29,21 @@ def create_app() -> FastAPI:
         description="Frontend API for DataInsight analysis agent",
         lifespan=lifespan,
     )
+
+    @app.exception_handler(IncompatibleSessionError)
+    async def incompatible_session_handler(
+        request: Request, exc: IncompatibleSessionError
+    ) -> JSONResponse:
+        """Return one stable response for every route touching an old Session."""
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": {
+                    "code": "INCOMPATIBLE_SESSION_SCHEMA",
+                    "message": str(exc),
+                }
+            },
+        )
 
     app.add_middleware(
         CORSMiddleware,
@@ -53,12 +69,19 @@ def create_app() -> FastAPI:
         session_id: str, request: Request
     ) -> SessionStateResponse:
         store: SessionStore = request.app.state.sessions
-        state = store.get(session_id)
+        try:
+            state = store.get(session_id)
+        except IncompatibleSessionError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "INCOMPATIBLE_SESSION_SCHEMA", "message": str(exc)},
+            ) from exc
         if state is None:
             raise HTTPException(404, "Session not found")
         return SessionStateResponse(
             session_id=session_id,
-            has_data=state.data_profile is not None,
+            schema_version=state.schema_version,
+            has_data=bool(state.data_sources) or state.data_profile is not None,
             has_intent=state.analysis_intent is not None,
             has_plan=state.plan is not None,
             has_results=state.analysis_result is not None,

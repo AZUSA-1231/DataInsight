@@ -15,6 +15,7 @@ chat-to-code path.
 4. `docs/roadmap.md` before starting a new cycle or feature.
 
 Historical PRDs, plans, decisions, and session summaries are under
+`docs/cycles/` for Cycle 5 onward. Earlier Claude Code artifacts remain under
 `.claude/archive/`. They explain why the architecture exists but are not the
 source of truth for current code behavior.
 
@@ -53,5 +54,6 @@ usable increment. At cycle closure:
 
 1. Record decisions that changed the architecture.
 2. Write a cycle summary with validation evidence and deferred work.
-3. Move detailed PRDs/plans into `.claude/archive/cycle-N/` for historical use.
+3. Move detailed PRDs/plans into `docs/cycles/<cycle>/archive/` for historical
+   use. Keep the cycle summary and development issues alongside that archive.
 4. Update `docs/architecture/current.md` and `docs/roadmap.md`.

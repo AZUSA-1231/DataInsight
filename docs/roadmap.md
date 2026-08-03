@@ -2,27 +2,49 @@
 
 ## Current State
 
-Cycle 4 is closed. The repository has a field-driven workspace, structured DAG
-units, Parquet checkpoints, template and generated execution paths, unit rerun,
-session persistence, a local API, and a functional browser workspace.
+Cycle 5 is closed. The repository now supports the complete local multi-table
+workflow: multi-source ingestion, qualified column references, explicit
+Snapshot and Checkpoint identity, Column Graph lineage, operation-specific
+Plan v2 validation, deterministic Derive/Filter/Join/Terminal execution,
+structured Join warnings, retained rerun history, and a usable browser
+workspace.
 
-There is intentionally no active implementation plan. The next cycle should be
-chosen by product outcome, not by continuing leftover engineering tasks.
+## Closed Cycle
 
-## Candidate Outcomes
+**Cycle 5: Column-First Lineage and Multi-Table Foundation**
 
-These are candidates for a future PRD, not committed scope:
+- [Cycle summary](cycles/cycle-5-column-lineage/summary.md)
+- [Development issues](cycles/cycle-5-column-lineage/development-issues.md)
+- [PRD, assessment, and milestone plans](cycles/cycle-5-column-lineage/archive/README.md)
 
-1. **Visual DAG intervention** — expose unit type, dependencies, snapshots,
-   execution mode, stale state, and rerun controls in the browser workspace.
-2. **Execution isolation** — move generated functions to a bounded worker with
-   timeout and resource controls while preserving the unified function contract.
-3. **Data quality workflow** — add explicit, reviewable cleaning decisions
-   without reintroducing a hidden preprocessing stage.
-4. **Multi-table analysis** — define ingestion-level joins and field provenance
-   before expanding the executor beyond one wide table.
-5. **Evaluation harness** — measure first-run success, retry rate, report
-   faithfulness, and latency on a stable corpus of real analysis questions.
+The cycle delivered the approved end-to-end scope. Detailed PRDs and milestone
+plans are historical artifacts under the cycle's `archive/` directory.
+
+The acceptance path is:
+
+```text
+upload orders + customers
+-> derive revenue
+-> filter into east_orders
+-> join customers
+-> run terminal analysis
+-> restart and reload the Session
+-> rerun a unit while retaining prior checkpoints and lineage
+```
+
+## Deferred Candidates
+
+These are candidates for a future PRD and are not committed scope:
+
+1. Unified Copilot behavior across Business Track and Planner.
+2. A visual lineage graph and checkpoint browser.
+3. Bounded worker isolation for generated functions and resource limits.
+4. Explicit, reviewable data-quality cleaning decisions.
+5. Aggregate, Window, Pivot, Union, Measure, and first-class Model operations.
+6. Checkpoint cleanup, cross-Session sources, database connections, and hosted
+   multi-user support.
+7. An evaluation harness for success rate, retries, report faithfulness, and
+   latency on a stable corpus.
 
 ## Selection Rule
 

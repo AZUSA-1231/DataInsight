@@ -2,12 +2,16 @@
 
 This directory is the current, tool-neutral documentation entry point.
 
-- `product/vision.md` — users, problem, product principles, and non-goals
-- `architecture/current.md` — implemented runtime architecture and contracts
-- `roadmap.md` — closure state and candidates for the next product cycle
+## Current Documents
 
-Detailed historical development artifacts remain in `.claude/archive/`. They
-should be consulted for rationale, not used as current implementation docs.
+- [Product vision](product/vision.md) - users, problem, principles, and non-goals
+- [Current architecture](architecture/current.md) - implemented runtime and contracts
+- [Roadmap](roadmap.md) - closed cycle state and future candidates
+- [Cycle 5 summary](cycles/cycle-5-column-lineage/summary.md)
+- [Cycle 5 development issues](cycles/cycle-5-column-lineage/development-issues.md)
+- [Cycle 5 archive](cycles/cycle-5-column-lineage/archive/README.md)
 
-No development cycle is active after the Cycle 4 closure. Start the next cycle
-by selecting one roadmap outcome and writing a product-level PRD before code.
+Cycle 5 is closed as the column-first lineage and multi-table foundation cycle.
+Its detailed PRD, assessment, and milestone plans are archived in the cycle
+directory under `cycles/cycle-5-column-lineage/archive/`. Historical artifacts
+explain decisions but are not the source of truth for current code behavior.

@@ -54,3 +54,19 @@ def validate_upload_path(upload_dir: Path, filename: str) -> Path:
         raise ValueError(f"Path traversal blocked: {filename}") from None
 
     return file_path
+
+
+def allocate_upload_path(upload_dir: Path, filename: str) -> Path:
+    """Return a safe non-overwriting path for an uploaded source."""
+    candidate = validate_upload_path(upload_dir, filename)
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    counter = 2
+    while True:
+        alternative = candidate.with_name(f"{stem}_{counter}{suffix}")
+        if not alternative.exists():
+            return alternative
+        counter += 1

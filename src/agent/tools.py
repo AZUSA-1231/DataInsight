@@ -24,11 +24,17 @@ class SubmitInstructionInput(BaseModel):
     )
     target_columns: list[str] = Field(
         default_factory=list,
-        description="EXACT column names for target/dependent variables",
+        description=(
+            "EXACT qualified Snapshot refs for target/dependent variables, "
+            "such as orders.amount"
+        ),
     )
     group_by: list[str] = Field(
         default_factory=list,
-        description="EXACT column names for grouping/segmentation dimensions",
+        description=(
+            "EXACT qualified Snapshot refs for grouping dimensions, such as "
+            "orders.region"
+        ),
     )
     filter_hint: str | None = Field(
         default=None,
@@ -79,7 +85,7 @@ class SubmitInstructionInput(BaseModel):
 
 
 class InspectColumnInput(BaseModel):
-    """Look up detailed statistics for a specific column in the dataset.
+    """Look up detailed statistics for an exact qualified column reference.
 
     Returns dtype, null count, null percentage, unique count, unique
     percentage, and sample values for the requested column. Use this
@@ -88,8 +94,8 @@ class InspectColumnInput(BaseModel):
 
     column_name: str = Field(
         description=(
-            "EXACT column name to inspect (case-sensitive, "
-            "use the name as it appears in the data)"
+            "EXACT qualified reference to inspect (case-sensitive, for example "
+            "orders.amount). Use the Snapshot registry spelling."
         )
     )
 
@@ -130,9 +136,9 @@ _SUBMIT_INSTRUCTION_TOOL = _build_tool_schema(
 _INSPECT_COLUMN_TOOL = _build_tool_schema(
     name="inspect_column",
     description=(
-        "Look up detailed statistics for a specific column in the dataset. "
-        "Returns dtype, null count, null percentage, unique count, unique "
-        "percentage, and sample values."
+        "Look up detailed statistics for an exact qualified Snapshot column "
+        "reference. Returns dtype, null count, unique count, and samples when "
+        "the source profile contains them."
     ),
     model=InspectColumnInput,
 )
@@ -146,19 +152,68 @@ BT_TOOLS: list[dict[str, object]] = [_SUBMIT_INSTRUCTION_TOOL, _INSPECT_COLUMN_T
 
 
 def resolve_inspect_column(column_name: str, data_profile: object | None = None) -> str:
-    """Resolve an inspect_column tool call using the data profile from state.
+    """Resolve an inspect call against a v2 registry or legacy profile."""
+    from src.agent.state import AgentState, DataProfile
 
-    Args:
-        column_name: Exact column name to look up.
-        data_profile: A DataProfile instance, or None if no data is loaded.
+    if isinstance(data_profile, AgentState):
+        state = data_profile
+        for snapshot in state.snapshot_registry.values():
+            checkpoint = state.checkpoint_registry.get(snapshot.current_checkpoint_id)
+            if checkpoint is None or column_name not in checkpoint.columns:
+                continue
 
-    Returns:
-        A formatted string with column statistics, or an error message.
-    """
+            node_id = checkpoint.columns[column_name]
+            node = state.column_graph.nodes.get(node_id)
+            if node is None:
+                return f"Column '{column_name}' is registered without a graph node."
+
+            source = next(
+                (
+                    source
+                    for source in state.data_sources
+                    if source.snapshot_id == snapshot.snapshot_id
+                ),
+                None,
+            )
+            profile = None
+            if source is not None:
+                profile = next(
+                    (item for item in source.profile.columns if item.name == node.name),
+                    None,
+                )
+            stats = source.profile.statistics.get(node.name, {}) if source else {}
+            sample_values: list[object] = []
+            if source is not None:
+                for row in source.profile.head_sample:
+                    if node.name in row:
+                        sample_values.append(row[node.name])
+            samples_str = ", ".join(repr(value) for value in sample_values[:5])
+            profile_text = (
+                f"  null_count: {profile.null_count} ({profile.null_pct:.1f}%)\n"
+                f"  unique_count: {profile.unique_count} ({profile.unique_pct:.1f}%)\n"
+                if profile is not None
+                else "  profile: (not available for this derived column)\n"
+            )
+            return (
+                f"Column: {column_name}\n"
+                f"  snapshot: {snapshot.name}\n"
+                f"  dtype: {node.dtype}\n"
+                f"  row_count: {node.row_count}\n"
+                f"{profile_text}"
+                f"  statistics: {stats or '(none)'}\n"
+                f"  sample values: [{samples_str}]"
+            )
+
+        available = sorted(
+            ref
+            for snapshot in state.snapshot_registry.values()
+            if (checkpoint := state.checkpoint_registry.get(snapshot.current_checkpoint_id))
+            for ref in checkpoint.columns
+        )
+        return f"Column '{column_name}' not found. Available qualified columns: {available}"
+
     if data_profile is None:
         return "No data uploaded yet. Please upload a CSV or Excel file first."
-
-    from src.agent.state import DataProfile
 
     if not isinstance(data_profile, DataProfile):
         return "Data profile is not available."
@@ -166,11 +221,11 @@ def resolve_inspect_column(column_name: str, data_profile: object | None = None)
     for col in data_profile.columns:
         if col.name == column_name:
             stats = data_profile.statistics.get(column_name, {})
-            sample_values: list[object] = []
+            legacy_sample_values: list[object] = []
             for row in data_profile.head_sample:
                 if column_name in row:
-                    sample_values.append(row[column_name])
-            samples_str = ", ".join(repr(v) for v in sample_values[:5])
+                    legacy_sample_values.append(row[column_name])
+            samples_str = ", ".join(repr(value) for value in legacy_sample_values[:5])
 
             return (
                 f"Column: {col.name}\n"
@@ -181,5 +236,5 @@ def resolve_inspect_column(column_name: str, data_profile: object | None = None)
                 f"  sample values: [{samples_str}]"
             )
 
-    available = [c.name for c in data_profile.columns]
+    available = [column.name for column in data_profile.columns]
     return f"Column '{column_name}' not found. Available columns: {available}"

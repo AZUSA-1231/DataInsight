@@ -65,6 +65,16 @@ def _parse_suggestions(raw: list[dict[str, object]]) -> list[Suggestion]:
     return suggestions
 
 
+def _qualified_registry_columns(state: AgentState) -> list[str]:
+    """Return all current Snapshot-head refs for BT field selection."""
+    refs: list[str] = []
+    for snapshot in sorted(state.snapshot_registry.values(), key=lambda item: item.name):
+        checkpoint = state.checkpoint_registry.get(snapshot.current_checkpoint_id)
+        if checkpoint is not None:
+            refs.extend(checkpoint.columns)
+    return refs
+
+
 def _build_bt_user_context(state: AgentState) -> str:
     """Build the dynamic user context injected alongside the system prompt.
 
@@ -74,23 +84,91 @@ def _build_bt_user_context(state: AgentState) -> str:
     parts: list[str] = []
 
     # ── Data context ──
-    unified_columns = state.unified_columns or []
+    unified_columns = _qualified_registry_columns(state) or state.unified_columns or []
     data_profile = state.data_profile
+
+    registry_lines: list[str] = []
+    for snapshot in sorted(
+        state.snapshot_registry.values(), key=lambda item: item.name
+    ):
+        checkpoint = state.checkpoint_registry.get(snapshot.current_checkpoint_id)
+        if checkpoint is None:
+            registry_lines.append(
+                f"  - {snapshot.name}: missing current checkpoint"
+            )
+            continue
+        source = next(
+            (item for item in state.data_sources if item.snapshot_id == snapshot.snapshot_id),
+            None,
+        )
+        source_label = f", source={source.display_name}" if source else ""
+        registry_lines.append(
+            f"  - {snapshot.name}: {checkpoint.row_count} rows "
+            f"(checkpoint={checkpoint.checkpoint_id}{source_label})"
+        )
+        profile_by_name = (
+            {column.name: column for column in source.profile.columns}
+            if source is not None
+            else {}
+        )
+        for ref, node_id in checkpoint.columns.items():
+            node = state.column_graph.nodes.get(node_id)
+            dtype = node.dtype if node is not None else "unknown"
+            profile = profile_by_name.get(node.name) if node is not None else None
+            null_suffix = f", null_pct={profile.null_pct:.1f}%" if profile else ""
+            registry_lines.append(f"      {ref} ({dtype}{null_suffix})")
+    if registry_lines:
+        parts.append(
+            "SNAPSHOTS AND QUALIFIED COLUMNS (use exact refs):\n"
+            + "\n".join(registry_lines)
+        )
+
+    if state.snapshot_registry:
+        parts.append(
+            "SOURCE PROFILES ARE GROUPED BY SNAPSHOT. Do not compare columns "
+            "from different Snapshots unless the user asks for a Join."
+        )
 
     if unified_columns:
         cols_with_types: list[str] = []
-        if data_profile and data_profile.columns:
-            for cp in data_profile.columns:
-                cols_with_types.append(f"  - {cp.name} ({cp.dtype})")
+        if state.snapshot_registry:
+            for ref in unified_columns:
+                node = None
+                for snapshot in state.snapshot_registry.values():
+                    checkpoint = state.checkpoint_registry.get(
+                        snapshot.current_checkpoint_id
+                    )
+                    if checkpoint is None:
+                        continue
+                    for current_ref, node_id in checkpoint.columns.items():
+                        if current_ref == ref:
+                            node = state.column_graph.nodes.get(node_id)
+                            break
+                    if node is not None:
+                        break
+                cols_with_types.append(f"  - {ref} ({node.dtype if node else 'unknown'})")
+        elif data_profile and data_profile.columns:
+            cols_with_types = [f"  - {cp.name} ({cp.dtype})" for cp in data_profile.columns]
         else:
             cols_with_types = [f"  - {c}" for c in unified_columns]
         parts.append(
             "AVAILABLE COLUMNS:\n" + "\n".join(cols_with_types)
         )
-    else:
+    elif not state.snapshot_registry:
         parts.append("AVAILABLE COLUMNS: (no data uploaded yet)")
 
-    if data_profile:
+    if state.data_sources:
+        total_rows = sum(source.profile.shape[0] for source in state.data_sources)
+        parts.append(
+            "DATA SUMMARY BY SNAPSHOT: "
+            + ", ".join(
+                f"{snapshot.name}={checkpoint.row_count} rows"
+                for snapshot in sorted(state.snapshot_registry.values(), key=lambda item: item.name)
+                if (checkpoint := state.checkpoint_registry.get(snapshot.current_checkpoint_id))
+            )
+            + f" (uploaded rows total={total_rows})"
+        )
+    elif data_profile:
         parts.append(
             f"DATA SUMMARY: {data_profile.shape[0]} rows, {data_profile.shape[1]} columns"
         )
@@ -185,7 +263,7 @@ def business_track_node(state: AgentState) -> tuple[dict[str, object], dict[str,
         metadata carries bt_response, bt_tool_called for the dialogue route.
     """
     user_message = state.user_requirement or ""
-    unified_columns = state.unified_columns or []
+    unified_columns = _qualified_registry_columns(state) or state.unified_columns or []
 
     logger.info(
         "BT Agent: msg=%d chars, columns=%d, plan=%s, history=%d turns",
@@ -284,7 +362,7 @@ def business_track_node(state: AgentState) -> tuple[dict[str, object], dict[str,
             elif tool_name == "inspect_column":
                 column_name = str(tool_args.get("column_name", ""))
                 logger.info("BT Agent: inspect_column called for '%s'", column_name)
-                result = resolve_inspect_column(column_name, state.data_profile)
+                result = resolve_inspect_column(column_name, state)
                 messages.append(
                     ToolMessage(content=result, tool_call_id=tc.get("id", ""))
                 )

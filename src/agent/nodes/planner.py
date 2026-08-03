@@ -5,11 +5,39 @@ import logging
 from typing import Any
 
 from src.agent.llm import get_llm
+from src.agent.plan_validation import PlanValidationError, validate_plan
 from src.agent.prompts import load_prompt
 from src.agent.state import AgentState, Plan, PlannerInstruction, PlanUnit
 from src.agent.utils import _extract_json
 
 logger = logging.getLogger(__name__)
+
+
+def _qualified_registry_columns(state: AgentState) -> list[str]:
+    """Return current-head qualified refs in Snapshot order."""
+    refs: list[str] = []
+    for snapshot in sorted(state.snapshot_registry.values(), key=lambda item: item.name):
+        checkpoint = state.checkpoint_registry.get(snapshot.current_checkpoint_id)
+        if checkpoint is not None:
+            refs.extend(checkpoint.columns)
+    return refs
+
+
+def _source_profile_context(state: AgentState) -> str:
+    """Serialize source profiles grouped by Snapshot for the Planner."""
+    profiles: list[dict[str, object]] = []
+    for source in sorted(state.data_sources, key=lambda item: item.display_name):
+        snapshot = state.snapshot_registry.get(source.snapshot_id)
+        profiles.append(
+            {
+                "source_id": source.source_id,
+                "snapshot_id": source.snapshot_id,
+                "snapshot": snapshot.name if snapshot else None,
+                "display_name": source.display_name,
+                "profile": source.profile.model_dump(mode="json"),
+            }
+        )
+    return json.dumps(profiles, ensure_ascii=False, indent=2)
 
 
 def _build_planner_user_context(state: AgentState) -> str:
@@ -72,6 +100,53 @@ def _build_planner_user_context(state: AgentState) -> str:
         )
 
     # ── 3. Data Profile ──
+    registry_lines: list[str] = []
+    for snapshot in sorted(
+        state.snapshot_registry.values(), key=lambda item: item.name
+    ):
+        checkpoint = state.checkpoint_registry.get(snapshot.current_checkpoint_id)
+        if checkpoint is None:
+            registry_lines.append(
+                f"  - Snapshot {snapshot.name}: missing current checkpoint"
+            )
+            continue
+        registry_lines.append(
+            f"  - Snapshot {snapshot.name}: {checkpoint.row_count} rows "
+            f"(checkpoint={checkpoint.checkpoint_id})"
+        )
+        source = next(
+            (
+                source
+                for source in state.data_sources
+                if source.snapshot_id == snapshot.snapshot_id
+            ),
+            None,
+        )
+        profile_by_name = (
+            {column.name: column for column in source.profile.columns}
+            if source is not None
+            else {}
+        )
+        for ref, node_id in checkpoint.columns.items():
+            node = state.column_graph.nodes.get(node_id)
+            dtype = node.dtype if node is not None else "unknown"
+            local_name = ref[len(snapshot.name) + 1 :]
+            profile = profile_by_name.get(local_name)
+            null_suffix = f", null_pct={profile.null_pct:.1f}%" if profile else ""
+            registry_lines.append(f"      {ref} ({dtype}{null_suffix})")
+
+    if registry_lines:
+        parts.append(
+            "=== SNAPSHOTS AND QUALIFIED COLUMNS (use exact refs) ===\n"
+            + "\n".join(registry_lines)
+        )
+
+    if state.data_sources:
+        parts.append(
+            "=== SOURCE PROFILES GROUPED BY SNAPSHOT ===\n"
+            + _source_profile_context(state)
+        )
+
     data_profile = state.data_profile
     if data_profile:
         parts.append(
@@ -82,7 +157,7 @@ def _build_planner_user_context(state: AgentState) -> str:
         parts.append("=== DATA PROFILE ===\n(not available)")
 
     # ── 4. Unified Columns ──
-    columns = state.unified_columns or []
+    columns = _qualified_registry_columns(state) or state.unified_columns or []
     parts.append(
         "=== AVAILABLE COLUMNS (use EXACT names) ===\n"
         + "\n".join(f"  - {c}" for c in columns)
@@ -127,24 +202,18 @@ def _format_suggestions(instruction: PlannerInstruction) -> str:
 
 
 def _parse_plan_from_json(parsed: dict[str, Any]) -> Plan:
-    """Build a Plan from parsed JSON, including related_fields."""
-    units = [
-        PlanUnit(
-            unit_id=u["unit_id"],
-            purpose=u["purpose"],
-            model_hint=u.get("model") or u.get("model_hint"),
-            cautious=u["cautious"],
-            depends_on=u.get("depends_on", []),
-            input_columns=u.get("input_columns", []),
-            output_columns=u.get("output_columns", []),
-            related_fields=u.get("related_fields", []),
+    """Round-trip Planner JSON through the complete Pydantic Plan contract."""
+    raw_units = parsed.get("units")
+    if isinstance(raw_units, list) and raw_units and all(
+        isinstance(unit, dict) and "operation" not in unit for unit in raw_units
+    ):
+        # Explicit compatibility boundary for Cycle 4 LLM fixtures. Real v2
+        # Planner output always takes the strict model_validate path below.
+        return Plan(
+            units=[PlanUnit.model_validate(unit) for unit in raw_units],
+            alignment_notes=str(parsed.get("alignment_notes", "")),
         )
-        for u in parsed["units"]
-    ]
-    return Plan(
-        units=units,
-        alignment_notes=parsed["alignment_notes"],
-    )
+    return Plan.model_validate(parsed)
 
 
 def planner_node(state: AgentState) -> dict[str, object]:
@@ -165,13 +234,14 @@ def planner_node(state: AgentState) -> dict[str, object]:
     Writes: state.plan (Plan)
     """
     data_profile = state.data_profile
-    unified_columns = state.unified_columns or []
+    unified_columns = _qualified_registry_columns(state) or state.unified_columns or []
+    has_registry_data = bool(state.snapshot_registry)
 
-    if not data_profile:
+    if not data_profile and not has_registry_data:
         logger.error("Planner: data_profile is missing from state")
         return {"error": "Planner: data_profile not available (Data Track may have failed)"}
 
-    if not unified_columns:
+    if not unified_columns and not has_registry_data:
         logger.error("Planner: unified_columns is empty — Data Track may have failed")
         return {"error": "Planner: unified_columns not available (Data Track may have failed)"}
 
@@ -214,10 +284,19 @@ def planner_node(state: AgentState) -> dict[str, object]:
     try:
         parsed = json.loads(json_text)
         plan = _parse_plan_from_json(parsed)
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error("Planner: failed to parse Plan JSON: %s", e)
         logger.debug("Planner: raw LLM output (first 500 chars): %s", content[:500])
         return {"error": f"Planner: failed to parse structured output: {e}"}
+
+    try:
+        validate_plan(plan, state)
+    except PlanValidationError as exc:
+        logger.error("Planner: generated Plan failed validation: %s", exc)
+        return {
+            "error": f"Planner: generated Plan failed validation: {exc}",
+            "_plan_validation_issues": [issue.model_dump() for issue in exc.issues],
+        }
 
     logger.info(
         "Planner: plan generated — %d analysis unit(s)",

@@ -9,7 +9,8 @@ from typing import Any
 import pandas as pd
 
 from src.agent.llm import get_llm
-from src.agent.state import AgentState, ExecutionMode, PlanUnit, UnitType
+from src.agent.plan_validation import PlanValidationError, validate_plan
+from src.agent.state import AgentState, ExecutionMode, JoinUnit, PlanUnitLike, UnitType
 from src.agent.templates import dispatch as _template_dispatch
 from src.agent.utils import _extract_code_block, _extract_json, register_temp_path
 from src.sandbox.executor import DEFAULT_TIMEOUT, SandboxResult, run_script
@@ -30,7 +31,7 @@ _MAX_WORKERS = 3
 _MAX_RETRIES = 3
 
 
-def _serialize_unit(unit: PlanUnit) -> str:
+def _serialize_unit(unit: PlanUnitLike) -> str:
     """Serialize a single PlanUnit as JSON for prompt inclusion."""
     return json.dumps(
         {
@@ -67,7 +68,7 @@ def _common_sandbox_rules() -> str:
 8. Detect CSV (encoding fallback: utf-8, gbk, latin-1) or Excel (.xls/.xlsx)."""
 
 
-def _type_specific_rules(unit: PlanUnit) -> str:
+def _type_specific_rules(unit: PlanUnitLike) -> str:
     """Return the in-process function contract for a Transform or Filter."""
     if unit.unit_type == UnitType.TRANSFORM:
         return """
@@ -129,7 +130,7 @@ STDOUT JSON (LAST line, one line only):
 
 
 def _build_unit_code_prompt(
-    unit: PlanUnit,
+    unit: PlanUnitLike,
     file_path: str,
     output_dir: str,
     upstream_context: str | None = None,
@@ -180,7 +181,7 @@ CRITICAL RULES (ALL unit types):
 
 
 def _build_unit_react_fix_prompt(
-    unit: PlanUnit,
+    unit: PlanUnitLike,
     previous_code: str,
     error_message: str,
     file_path: str,
@@ -259,7 +260,7 @@ Output the FIXED complete Python script (with ```python fence).
 """
 
 
-def _build_upstream_context(unit: PlanUnit) -> str | None:
+def _build_upstream_context(unit: PlanUnitLike) -> str | None:
     """Build upstream context string for the code-gen prompt.
 
     Describes what new columns are available from upstream units
@@ -283,14 +284,9 @@ def _build_upstream_context(unit: PlanUnit) -> str | None:
 
 
 def _load_input_data(data_path: str) -> pd.DataFrame:
-    """Load input data from CSV or Parquet, falling back to CSV on Parquet errors."""
+    """Load one resolved execution input without path fallbacks."""
     if data_path.endswith(".parquet"):
-        try:
-            return pd.read_parquet(data_path)
-        except Exception:
-            logger.warning(
-                "Parquet load failed for %s, trying CSV fallback", data_path,
-            )
+        return pd.read_parquet(data_path)
     return pd.read_csv(data_path)
 
 
@@ -312,7 +308,7 @@ def _model_name(llm: object, node: str) -> str:
 
 
 def _build_inprocess_prompt(
-    unit: PlanUnit,
+    unit: PlanUnitLike,
     retry_context: dict[str, str] | None = None,
 ) -> str:
     """Prompt for generating a single ``_unit`` function body (no script boilerplate).
@@ -369,7 +365,7 @@ RULES:
 
 
 def _execute_inprocess_llm(
-    unit: PlanUnit,
+    unit: PlanUnitLike,
     data_path: str,
     output_dir: str,
     retry_state: dict[str, Any] | None = None,
@@ -486,7 +482,7 @@ def _execute_inprocess_llm(
 
 
 def _execute_unit(
-    unit: PlanUnit,
+    unit: PlanUnitLike,
     data_path: str,
     parent_output_dir: str,
     unit_retry_state: dict[str, Any] | None = None,
@@ -501,6 +497,21 @@ def _execute_unit(
     error, retry_count, scripts, stdout.
     """
     unit_id = unit.unit_id
+    if isinstance(unit, JoinUnit):
+        return {
+            "unit_id": unit_id,
+            "status": "failed",
+            "parsed_output": None,
+            "charts": [],
+            "insights": [],
+            "statistics": {},
+            "error": "Join units require the two-input DAG dispatch path",
+            "retry_count": 0,
+            "scripts": [],
+            "stdout": "",
+            "stderr": "",
+            "output_dir": parent_output_dir,
+        }
     unit_output_dir = os.path.join(parent_output_dir, f"unit_{unit_id}")
     os.makedirs(unit_output_dir, exist_ok=True)
     register_temp_path(unit_output_dir)
@@ -691,6 +702,19 @@ def analysis_node(state: AgentState) -> dict[str, object]:
             "analysis_result": {"unit_results": [], "status": "failed"},
         }
 
+    try:
+        validate_plan(plan, state)
+    except PlanValidationError as exc:
+        logger.error("Analysis: plan validation failed: %s", exc)
+        return {
+            "error": str(exc),
+            "analysis_result": {
+                "unit_results": [],
+                "status": "failed",
+                "validation_issues": [issue.model_dump() for issue in exc.issues],
+            },
+        }
+
     units = plan.units
     if not units:
         logger.info("Analysis: no analysis units — skipping")
@@ -727,6 +751,12 @@ def analysis_node(state: AgentState) -> dict[str, object]:
         state, parent_output_dir, prev_unit_results, _execute_unit,
     )
 
+    snapshot_registry = dag_result.pop("snapshot_registry", None)
+    checkpoint_registry = dag_result.pop("checkpoint_registry", None)
+    column_graph = dag_result.pop("column_graph", None)
+    dag_result.pop("failed_unit_ids", None)
+    dag_result.pop("unit_map", None)
+
     errors: list[str] = []
     for ur in dag_result.get("unit_results", []):
         if ur["status"] == "failed":
@@ -736,5 +766,16 @@ def analysis_node(state: AgentState) -> dict[str, object]:
 
     return {
         "analysis_result": dag_result,
+        **(
+            {
+                "snapshot_registry": snapshot_registry,
+                "checkpoint_registry": checkpoint_registry,
+                "column_graph": column_graph,
+            }
+            if snapshot_registry is not None
+            and checkpoint_registry is not None
+            and column_graph is not None
+            else {}
+        ),
         "error": "; ".join(errors) if errors else None,
     }
