@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -13,13 +13,13 @@ from pydantic import (
 )
 
 
-class UnitType(str, Enum):
+class UnitType(StrEnum):
     TRANSFORM = "transform"
     FILTER = "filter"
     TERMINAL = "terminal"
 
 
-class ExecutionMode(str, Enum):
+class ExecutionMode(StrEnum):
     TEMPLATE = "template"
     LLM = "llm"
 
