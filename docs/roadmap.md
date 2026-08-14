@@ -2,12 +2,10 @@
 
 ## Current State
 
-Cycle 5 is closed. The repository now supports the complete local multi-table
-workflow: multi-source ingestion, qualified column references, explicit
-Snapshot and Checkpoint identity, Column Graph lineage, operation-specific
-Plan v2 validation, deterministic Derive/Filter/Join/Terminal execution,
-structured Join warnings, retained rerun history, and a usable browser
-workspace.
+Cycle 6 is closed. The repository supports the complete Cycle 5 local
+multi-table workflow plus one bounded Copilot chat path: fresh workspace
+context, recent conversation reuse, static inspection tools, injectable Plan
+edit proposals, soft skills, and explicit in-request tool limits.
 
 ## Closed Cycle
 
@@ -32,11 +30,20 @@ upload orders + customers
 -> rerun a unit while retaining prior checkpoints and lineage
 ```
 
+**Cycle 6: Bounded Copilot Chat**
+
+- [Cycle summary](cycles/cycle-6-command-copilot/summary.md)
+- [Development issues](cycles/cycle-6-command-copilot/issues.md)
+
+The Copilot is an overlay, not a second workspace runtime. The browser uses
+`POST /api/sessions/{session_id}/copilot`; the old `/dialogue` endpoint remains
+only for compatibility. Workspace confirmation for Plan proposals is deferred.
+
 ## Deferred Candidates
 
 These are candidates for a future PRD and are not committed scope:
 
-1. Unified Copilot behavior across Business Track and Planner.
+1. Workspace Accept/Reject interaction for Copilot Plan proposals.
 2. A visual lineage graph and checkpoint browser.
 3. Bounded worker isolation for generated functions and resource limits.
 4. Explicit, reviewable data-quality cleaning decisions.

@@ -355,9 +355,8 @@ async def generate_plan(
     if state.planner_instruction is None and state.analysis_intent is None:
         raise HTTPException(
             400,
-            "No instruction from Business Track yet. "
-            "Send a message via POST /dialogue first to let the BT Agent "
-            "understand your goal, then generate the plan.",
+            "No instruction is available for Planner generation. "
+            "Create or edit a Plan in the Workspace first.",
         )
 
     result = planner_node(state)

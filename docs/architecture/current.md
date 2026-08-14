@@ -6,7 +6,7 @@ the browser is not a generic chat-to-code surface.
 
 ## Runtime Flow
 
-The planner-driven workflow used by the browser API is:
+The durable workspace workflow remains planner-driven:
 
 ```text
 data_track -> business_track -> planner -> analysis -> report_gen
@@ -28,6 +28,20 @@ upload source
 Business Track and Planner receive the current source profiles and qualified
 columns grouped by Snapshot. Planner output is parsed through the same
 operation-specific Pydantic contract used by the workspace API.
+
+The active browser chat is an overlay on that workflow:
+
+```text
+POST /copilot
+  -> fresh workspace projection + recent dialogue history
+  -> bounded Copilot model/tool exchange
+  -> normal assistant response
+```
+
+The Copilot can inspect workspace facts and propose a complete Plan edit, but
+it does not commit Plan, execution, or report state. The former `/dialogue`
+route remains only as a compatibility entry point for existing clients; the
+browser no longer uses its Business Track loop.
 
 ## Durable State
 
@@ -103,17 +117,18 @@ dependent chain using newly produced outputs.
 
 ## Interfaces
 
-FastAPI exposes session, data, dialogue, workspace, execution, dashboard, and
-report routes. The data surface includes source/profile filtering, Snapshot
-heads, visible qualified columns, and public `/data/lineage` projections that
-hide internal column-node IDs. Execution responses expose run IDs, checkpoint
-references, row counts, warnings, stale state, and rerun results.
+FastAPI exposes session, data, Copilot, compatibility dialogue, workspace,
+execution, dashboard, and report routes. The data surface includes
+source/profile filtering, Snapshot heads, visible qualified columns, and
+public `/data/lineage` projections that hide internal column-node IDs.
+Execution responses expose run IDs, checkpoint references, row counts,
+warnings, stale state, and rerun results.
 
 The zero-build browser supports multi-file upload, source/Snapshot grouping,
 qualified-column drag and drop, operation-specific Derive/Filter/Join/Terminal
-forms, execution polling, warning display, stale/rerun controls, dashboards,
-and reports. Internal checkpoint IDs and column-node IDs are backend metadata,
-not editable frontend objects.
+forms, bounded Copilot chat, execution polling, warning display, stale/rerun
+controls, dashboards, and reports. Internal checkpoint IDs and column-node IDs
+are backend metadata, not editable frontend objects.
 
 `SessionStore` caches states in memory and atomically persists JSON under
 `data/sessions/{session_id}/state.json`. Executor-only result keys beginning

@@ -1,0 +1,4 @@
+Focus on helping the user form or revise an analysis Plan. If workspace facts
+are missing, inspect them first. Then use the Plan editing tool only when you
+can return a complete, validated Plan proposal. A Plan proposal is not a
+Workspace mutation in this milestone; explain what would change.

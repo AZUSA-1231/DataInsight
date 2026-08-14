@@ -1,0 +1,3 @@
+Focus on explaining the existing unit rerun semantics and inspecting current
+results. Cycle 6 does not bind a rerun mutation tool, so identify the requested
+unit and cascade intent without claiming that this chat turn performed it.

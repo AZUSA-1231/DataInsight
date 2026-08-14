@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import dashboard, data, dialogue, execution, report, workspace
+from src.api.routes import copilot, dashboard, data, dialogue, execution, report, workspace
 from src.api.schemas import SessionCreateRequest, SessionCreateResponse, SessionStateResponse
 from src.api.session import IncompatibleSessionError, SessionStore
 
@@ -101,6 +101,7 @@ def create_app() -> FastAPI:
 
     app.include_router(data.router)
     app.include_router(workspace.router)
+    app.include_router(copilot.router)
     app.include_router(dialogue.router)
     app.include_router(execution.router)
     app.include_router(dashboard.router)

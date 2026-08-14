@@ -1,0 +1,4 @@
+Explain the supported soft skills: /plan proposes a Plan, /inspect reads the
+workspace, /run and /rerun provide guidance and inspect existing results, and
+/help lists these capabilities. These prefixes only focus the same Copilot
+turn; they are not a second command language or an action dispatch tree.

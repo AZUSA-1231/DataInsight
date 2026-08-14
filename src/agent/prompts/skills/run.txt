@@ -1,0 +1,3 @@
+Focus on explaining how to run the existing Plan and inspect any current
+execution result or warnings. Cycle 6 does not bind an execution mutation tool,
+so never claim that this chat turn started a run.

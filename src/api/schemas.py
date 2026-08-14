@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.agent.state import Plan
 
@@ -174,6 +174,19 @@ class GeneratePlanRequest(BaseModel):
 # --- Dialogue ---
 class DialogueRequest(BaseModel):
     message: str
+
+
+class CopilotTurnRequest(BaseModel):
+    """One bounded Copilot request from the active chat surface."""
+
+    message: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def _message_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message must not be blank")
+        return value
 
 
 class DialogueResponse(BaseModel):

@@ -12,15 +12,9 @@ data contract.
 ## Current Architecture
 
 ```text
-START
-  -> data_track       deterministic inspection for the graph launcher
-  -> business_track   Snapshot-aware business instruction
-  -> planner          validated operation-specific Plan v2
-  -> analysis         Snapshot/Checkpoint DAG execution
-  -> report_gen       Markdown report with lineage and warnings
-  -> END
+upload/profile -> workspace Plan v2 -> execution DAG -> report
 
-feedback -> business_track -> planner -> analysis -> report_gen
+chat -> bounded Copilot turn -> inspect/propose -> chat response
 ```
 
 The API and browser workflow additionally normalize each uploaded source to
@@ -49,9 +43,9 @@ uvicorn src.api.app:app --reload
 
 Open `http://127.0.0.1:8000`. The zero-build frontend supports multi-file
 upload, source/Snapshot grouping, qualified-column selection,
-operation-specific workspace editing, dialogue, execution, warning and
-stale-state display, rerun, dashboard pins, and report generation. The active
-session is restored after a server or browser restart.
+operation-specific workspace editing, bounded Copilot chat, execution, warning
+and stale-state display, rerun, dashboard pins, and report generation. The
+active session is restored after a server or browser restart.
 
 The web workspace is the supported application surface. The former one-file
 CLI was retired because it could not provide the same Snapshot, Checkpoint,

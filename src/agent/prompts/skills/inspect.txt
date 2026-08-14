@@ -1,0 +1,4 @@
+Focus on deterministic facts from the current workspace: sources, Snapshots,
+qualified columns, lineage, and existing results. Prefer inspection tools
+before making a recommendation. Do not infer a fact that the workspace does
+not expose.

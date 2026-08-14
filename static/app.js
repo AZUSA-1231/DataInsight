@@ -12,8 +12,6 @@
     results: null,
     pins: [],
     pollingTimer: null,
-    pendingInstruction: null,
-    pendingAction: null,
   };
   const SESSION_KEY = "datainsight.sessionId";
   const $ = (selector) => document.querySelector(selector);
@@ -854,11 +852,6 @@
     });
   }
 
-  function parseSseData(raw) {
-    if (!raw) return null;
-    try { return JSON.parse(raw); } catch (_) { return raw; }
-  }
-
   async function sendMessage() {
     const input = dom.dialogueInput;
     const message = input.value.trim();
@@ -867,45 +860,19 @@
     input.disabled = true;
     dom.dialogueSend.disabled = true;
     appendMessage("user", message);
-    const stream = document.createElement("div");
-    stream.className = "dialogue-msg assistant streaming";
-    stream.innerHTML = '<div class="sender">AI</div><div class="content"></div>';
-    dom.dialogueMessages.appendChild(stream);
-    const content = stream.querySelector(".content");
-    let fullText = "";
-    let source = null;
-    const finish = (text) => {
-      stream.classList.remove("streaming");
-      if (source) source.close();
-      if (text) content.textContent = text;
+    const assistant = appendMessage("assistant", "Thinking...");
+    const content = assistant.querySelector(".content");
+    try {
+      const data = await api("/copilot", {
+        method: "POST",
+        body: { message },
+      });
+      content.textContent = data.message || data.error || "No response";
+    } catch (error) {
+      content.textContent = `Error: ${error.message}`;
+    } finally {
       input.disabled = false;
       dom.dialogueSend.disabled = false;
-    };
-    try {
-      source = new EventSource(`/api/sessions/${App.sessionId}/dialogue/stream?message=${encodeURIComponent(message)}`);
-      source.addEventListener("token", (event) => {
-        const token = parseSseData(event.data);
-        if (token != null) {
-          fullText += token;
-          content.textContent = fullText;
-        }
-      });
-      source.addEventListener("tool_call", (event) => {
-        const data = parseSseData(event.data);
-        if (data && data.name === "submit_planner_instruction") App.pendingInstruction = data.args;
-      });
-      source.addEventListener("done", (event) => {
-        const data = parseSseData(event.data) || {};
-        const action = data.action || "chat";
-        if (data.instruction) App.pendingInstruction = data.instruction;
-        App.pendingAction = action;
-        finish(data.full_text || fullText);
-        if (action === "confirm") showConfirmation(stream);
-      });
-      source.addEventListener("sse_error", (event) => finish(`Error: ${parseSseData(event.data) || "unknown error"}`));
-      source.addEventListener("error", () => finish(fullText || "Connection error"));
-    } catch (error) {
-      finish(`Error: ${error.message}`);
     }
   }
 
@@ -915,38 +882,7 @@
     message.innerHTML = `<div class="sender">${role === "user" ? "YOU" : "AI"}</div><div class="content">${esc(text)}</div>`;
     dom.dialogueMessages.appendChild(message);
     dom.dialogueMessages.scrollTop = dom.dialogueMessages.scrollHeight;
-  }
-
-  function showConfirmation(afterMessage) {
-    document.querySelectorAll(".confirm-row").forEach((row) => row.remove());
-    const row = document.createElement("div");
-    row.className = "confirm-row";
-    row.innerHTML = '<button class="btn btn-primary">Generate workspace</button><button class="btn btn-secondary">Ignore</button>';
-    row.querySelector(".btn-primary").addEventListener("click", () => {
-      row.remove();
-      executePendingAction();
-    });
-    row.querySelector(".btn-secondary").addEventListener("click", () => {
-      App.pendingInstruction = null;
-      row.remove();
-    });
-    afterMessage.parentNode.insertBefore(row, afterMessage.nextSibling);
-  }
-
-  async function executePendingAction() {
-    if (!App.pendingInstruction) return generatePlan();
-    dom.btnGenPlan.disabled = true;
-    try {
-      const data = await api("/plan/generate", { method: "POST", body: { instruction: App.pendingInstruction } });
-      App.plan = data.plan;
-      App.pendingInstruction = null;
-      App.pendingAction = null;
-      renderWorkspace();
-    } catch (error) {
-      showError("workspace-area", error.message);
-    } finally {
-      dom.btnGenPlan.disabled = false;
-    }
+    return message;
   }
 
   async function runExecution() {
