@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
-from src.agent.state import Plan
+from src.agent.state import AgentChatMessage, Plan, WorkspaceLayout
 
 
 # --- Session ---
 class SessionCreateRequest(BaseModel):
     user_requirement: str = ""
+    title: str | None = Field(default=None, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def _title_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("title must not be blank")
+        return value.strip() if value is not None else None
 
 
 class SessionCreateResponse(BaseModel):
@@ -16,14 +26,90 @@ class SessionCreateResponse(BaseModel):
 
 class SessionStateResponse(BaseModel):
     session_id: str
+    project_id: str
     schema_version: int = 2
+    title: str
+    created_at: str | None = None
     has_data: bool
     has_intent: bool
     has_plan: bool
     has_results: bool
     has_report: bool
+    agent_chat_count: int = 0
+    status: str | None = None
     error: str | None = None
     persisted_at: str | None = None
+
+
+class ProjectSummaryResponse(BaseModel):
+    project_id: str
+    title: str
+    created_at: str | None = None
+    persisted_at: str | None = None
+    source_count: int = 0
+    unit_count: int = 0
+    has_results: bool = False
+    has_report: bool = False
+    agent_chat_count: int = 0
+    status: str | None = None
+
+
+class ProjectsResponse(BaseModel):
+    projects: list[ProjectSummaryResponse] = Field(default_factory=list)
+
+
+class ProjectRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def _title_must_not_be_blank(cls, value: str) -> str:
+        title = value.strip()
+        if not title:
+            raise ValueError("title must not be blank")
+        return title
+
+
+class AgentChatMessageResponse(BaseModel):
+    role: str
+    content: str
+    created_at: str
+
+    @classmethod
+    def from_message(cls, message: AgentChatMessage) -> AgentChatMessageResponse:
+        return cls(
+            role=message.role,
+            content=message.content,
+            created_at=message.created_at,
+        )
+
+
+class AgentThreadSummaryResponse(BaseModel):
+    thread_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int = 0
+    preview: str | None = None
+
+
+class AgentThreadsResponse(BaseModel):
+    threads: list[AgentThreadSummaryResponse] = Field(default_factory=list)
+
+
+class AgentThreadResponse(AgentThreadSummaryResponse):
+    messages: list[AgentChatMessageResponse] = Field(default_factory=list)
+
+
+class AgentThreadCreateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def _thread_title_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("title must not be blank")
+        return value.strip() if value is not None else None
 
 
 # --- Data Pool ---
@@ -120,6 +206,46 @@ class ColumnsResponse(BaseModel):
     unified_columns: list[str] = Field(default_factory=list)
 
 
+class WorkspaceSnapshotViewResponse(BaseModel):
+    """One materialized or Plan-derived logical Snapshot view."""
+
+    view_id: str
+    snapshot_id: str | None = None
+    name: str
+    display_name: str
+    row_count: int | None = None
+    column_refs: list[str] = Field(default_factory=list)
+    source_id: str | None = None
+    created_by_unit_id: int | None = None
+    parent_snapshot_names: list[str] = Field(default_factory=list)
+    availability: Literal["materialized", "planned"]
+    profile_available: bool
+
+
+class WorkspaceColumnViewResponse(BaseModel):
+    """One public column fact, including nullable Plan-time facts."""
+
+    ref: str
+    name: str
+    snapshot: str
+    dtype: str | None = None
+    null_count: int | None = None
+    null_pct: float | None = None
+    source_column: str | None = None
+    created_by_unit_id: int | None = None
+    availability: Literal["materialized", "planned"]
+
+
+class WorkspaceDataProjectionResponse(BaseModel):
+    """One coherent Explorer catalog projection."""
+
+    sources: list[SourceResponse] = Field(default_factory=list)
+    snapshots: list[WorkspaceSnapshotViewResponse] = Field(default_factory=list)
+    columns: list[WorkspaceColumnViewResponse] = Field(default_factory=list)
+    lineage: list[LineageColumnResponse] = Field(default_factory=list)
+    compatibility_warning: str | None = None
+
+
 # --- Workspace ---
 class UnitCreateRequest(BaseModel):
     purpose: str = ""
@@ -167,6 +293,10 @@ class WorkspacePlanResponse(BaseModel):
     plan: Plan | None
 
 
+class WorkspaceLayoutResponse(WorkspaceLayout):
+    """Presentation-only layout returned by the Project workspace API."""
+
+
 class GeneratePlanRequest(BaseModel):
     instruction: dict[str, object] | None = None
 
@@ -180,6 +310,7 @@ class CopilotTurnRequest(BaseModel):
     """One bounded Copilot request from the active chat surface."""
 
     message: str = Field(min_length=1, max_length=2000)
+    thread_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("message")
     @classmethod

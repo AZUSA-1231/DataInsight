@@ -1,0 +1,1 @@
+export const MAX_AGENT_MESSAGE_LENGTH = 2000;

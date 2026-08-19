@@ -16,6 +16,8 @@ htmlcov/
 .env
 .venv/
 venv/
+node_modules/
+frontend/dist/
 
 # IDE
 .vscode/

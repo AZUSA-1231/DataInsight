@@ -24,6 +24,19 @@ def _get_store(request: Request) -> SessionStore:
     return cast(SessionStore, request.app.state.sessions)
 
 
+def _thread_history(thread: object) -> list[dict[str, str]]:
+    """Project a Thread for the legacy Business Track adapter only."""
+
+    messages = getattr(thread, "messages", [])
+    history: list[dict[str, str]] = []
+    for message in messages:
+        role = getattr(message, "role", None)
+        content = getattr(message, "content", None)
+        if role in {"user", "assistant"} and isinstance(content, str) and content:
+            history.append({"role": role, "content": content})
+    return history
+
+
 @router.post("", response_model=DialogueResponse)
 async def send_message(
     session_id: str, body: DialogueRequest, request: Request
@@ -33,17 +46,17 @@ async def send_message(
     if state is None:
         raise HTTPException(404, "Session not found")
 
-    store.update(session_id, {"user_requirement": sanitize_user_input(body.message, 2000)})
+    thread = store.ensure_default_thread(session_id)
+    user_message = sanitize_user_input(body.message, 2000)
+    store.update(session_id, {"user_requirement": user_message})
     updated = store.get(session_id)
     assert updated is not None
 
-    history = list(updated.dialogue_history or [])
-    history.append({"role": "user", "content": updated.user_requirement})
-    store.update(session_id, {"dialogue_history": history})
-    updated = store.get(session_id)
-    assert updated is not None
+    compatibility_history = _thread_history(thread)
+    compatibility_history.append({"role": "user", "content": user_message})
+    bt_state = updated.model_copy(update={"dialogue_history": compatibility_history})
 
-    result, bt_meta = business_track_node(updated)
+    result, bt_meta = business_track_node(bt_state)
     if "error" in result:
         raise HTTPException(400, str(result["error"]))
 
@@ -56,12 +69,11 @@ async def send_message(
     if "feedback" in result:
         state_update["feedback"] = result["feedback"]
 
-    # Append BT response to dialogue history
+    # Append the compatibility turn to the addressed Project Thread. The
+    # legacy global dialogue_history field remains untouched after migration.
     bt_response: str = str(bt_meta.get("_bt_response", ""))
-    history = list(updated.dialogue_history or [])
     if bt_response:
-        history.append({"role": "assistant", "content": bt_response})
-        state_update["dialogue_history"] = history
+        store.append_agent_turn(session_id, thread.thread_id, user_message, bt_response)
 
     if state_update:
         store.update(session_id, state_update)
@@ -133,18 +145,18 @@ async def stream_intent(
         raise HTTPException(404, "Session not found")
 
     message = sanitize_user_input(message, 2000)
+    thread = store.ensure_default_thread(session_id)
     store.update(session_id, {"user_requirement": message})
-
-    # Append user message to dialogue history
-    history: list[dict[str, str]] = list(state.dialogue_history or [])
-    history.append({"role": "user", "content": message})
-    store.update(session_id, {"dialogue_history": history})
 
     updated = store.get(session_id)
     assert updated is not None
 
+    compatibility_history = _thread_history(thread)
+    compatibility_history.append({"role": "user", "content": message})
+    bt_state = updated.model_copy(update={"dialogue_history": compatibility_history})
+
     # BT Agent call (non-streaming, with agent loop for tool calling)
-    bt_result, bt_meta = business_track_node(updated)
+    bt_result, bt_meta = business_track_node(bt_state)
 
     # Save state fields to session
     state_update: dict[str, object] = {}
@@ -156,17 +168,15 @@ async def stream_intent(
         if "feedback" in bt_result:
             state_update["feedback"] = bt_result["feedback"]
 
-    # Append BT explanation to dialogue history
-    if "error" not in bt_result:
-        bt_explanation: str = str(bt_meta.get("_bt_response", ""))
-        if bt_explanation:
-            history.append({"role": "assistant", "content": bt_explanation})
-            state_update["dialogue_history"] = history
+    # Persist successful compatibility turns in the Project Thread, not in the
+    # retired global history field.
+    explanation: str = str(bt_meta.get("_bt_response", ""))
+    if "error" not in bt_result and explanation:
+        store.append_agent_turn(session_id, thread.thread_id, message, explanation)
 
     if state_update:
         store.update(session_id, state_update)
 
-    explanation: str = str(bt_meta.get("_bt_response", ""))
     instruction = bt_result.get("planner_instruction")
     tool_called: bool = bool(bt_meta.get("_bt_tool_called", False))
     bt_error: str | None = str(bt_result["error"]) if "error" in bt_result else None
@@ -186,6 +196,12 @@ async def stream_intent(
                     if text:
                         full += text
                         yield f"event: token\ndata: {json.dumps(text)}\n\n"
+                store.append_agent_turn(
+                    session_id,
+                    thread.thread_id,
+                    message,
+                    full.strip() or "No assistant response was generated.",
+                )
                 fb_done = json.dumps({"action": "chat", "full_text": full.strip()})
                 yield f"event: done\ndata: {fb_done}\n\n"
                 return

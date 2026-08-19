@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from src.agent.copilot import (
     CopilotInvalidMessageError,
     CopilotSessionNotFoundError,
+    CopilotThreadNotFoundError,
     CopilotTurnHandler,
     CopilotTurnResult,
 )
@@ -49,8 +50,14 @@ async def send_copilot_turn(
     store = _get_store(request)
     handler = _build_handler(request, store)
     try:
-        return handler.handle(session_id, body.message)
+        return handler.handle(
+            session_id,
+            body.message,
+            thread_id=body.thread_id,
+        )
     except CopilotSessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
+    except CopilotThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Agent Thread not found") from exc
     except CopilotInvalidMessageError as exc:
         raise HTTPException(status_code=422, detail="Message must not be blank") from exc

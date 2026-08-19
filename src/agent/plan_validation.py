@@ -69,13 +69,45 @@ class PlanValidationResult(BaseModel):
     issues: list[PlanValidationIssue] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PlanColumnView:
+    """One read-only column fact produced by Plan schema evaluation."""
+
+    ref: str
+    name: str
+    snapshot: str
+    dtype: str | None = None
+    source_column: str | None = None
+    materialized_node_id: str | None = None
+    planned_by_unit_id: int | None = None
+
+
+@dataclass(frozen=True)
+class PlanSnapshotView:
+    """One read-only logical Snapshot view after Plan schema evaluation."""
+
+    name: str
+    columns: tuple[PlanColumnView, ...]
+    producer_unit_id: int | None = None
+    parent_snapshot_names: tuple[str, ...] = ()
+
+
 @dataclass
 class _SnapshotView:
     """The refs visible at one point in deterministic plan simulation."""
 
     name: str
-    refs: dict[str, str]
+    refs: dict[str, PlanColumnView]
     producer_unit_id: int | None = None
+    parent_snapshot_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PlanEvaluation:
+    """Issues plus the simulated views used to produce those issues."""
+
+    issues: tuple[PlanValidationIssue, ...]
+    views: dict[str, _SnapshotView]
 
 
 def collect_plan_issues(
@@ -92,6 +124,50 @@ def collect_plan_issues(
     useful for isolated tests and small API integrations.
     """
 
+    return list(
+        _evaluate_plan(
+            plan,
+            state,
+            snapshot_registry=snapshot_registry,
+            checkpoint_registry=checkpoint_registry,
+            column_graph=column_graph,
+            allow_reexecution=allow_reexecution,
+        ).issues
+    )
+
+
+def project_plan_snapshot_views(
+    plan: Plan,
+    state: AgentState,
+) -> dict[str, PlanSnapshotView]:
+    """Project the current Plan into read-only logical Snapshot schemas.
+
+    The projection uses the same deterministic evaluator as Plan validation and
+    deliberately allows the current Plan to describe a previously successful
+    output. That exception is limited to this read-only projection; callers
+    that save or execute a Plan continue to use the normal validation policy.
+    """
+
+    evaluation = _evaluate_plan(plan, state, allow_reexecution=True)
+    return {
+        name: PlanSnapshotView(
+            name=view.name,
+            columns=tuple(view.refs.values()),
+            producer_unit_id=view.producer_unit_id,
+            parent_snapshot_names=view.parent_snapshot_names,
+        )
+        for name, view in evaluation.views.items()
+    }
+
+
+def _evaluate_plan(
+    plan: Plan,
+    state: AgentState | dict[str, SnapshotRecord] | None = None,
+    snapshot_registry: dict[str, SnapshotRecord] | None = None,
+    checkpoint_registry: dict[str, CheckpointRecord] | None = None,
+    column_graph: ColumnGraph | None = None,
+    allow_reexecution: bool = False,
+) -> _PlanEvaluation:
     if state is not None and hasattr(state, "snapshot_registry"):
         state_obj = cast(AgentState, state)
         snapshot_registry = state_obj.snapshot_registry
@@ -134,7 +210,7 @@ def collect_plan_issues(
             )
 
     if not units:
-        return issues
+        return _PlanEvaluation(issues=tuple(issues), views={})
 
     # Legacy units are tolerated only as a complete legacy plan without a v2
     # registry. They are never used as a source of truth by the v2 path.
@@ -148,7 +224,7 @@ def collect_plan_issues(
                     message="Cycle 4 Plan units cannot be saved in a v2 data session",
                 )
             )
-        return issues
+        return _PlanEvaluation(issues=tuple(issues), views={})
 
     for unit in units:
         if isinstance(unit, PlanUnit):
@@ -249,7 +325,10 @@ def collect_plan_issues(
                 )
             )
 
-    return _deduplicate_issues(issues)
+    return _PlanEvaluation(
+        issues=tuple(_deduplicate_issues(issues)),
+        views=views,
+    )
 
 
 def validate_plan(
@@ -303,6 +382,7 @@ def _initial_snapshot_views(
     issues: list[PlanValidationIssue],
 ) -> dict[str, _SnapshotView]:
     views: dict[str, _SnapshotView] = {}
+    names_by_id = {snapshot.snapshot_id: snapshot.name for snapshot in snapshots.values()}
     for snapshot in snapshots.values():
         name = snapshot.name
         checkpoint = checkpoints.get(snapshot.current_checkpoint_id)
@@ -320,7 +400,7 @@ def _initial_snapshot_views(
             views[name] = _SnapshotView(name=name, refs={})
             continue
 
-        refs: dict[str, str] = {}
+        refs: dict[str, PlanColumnView] = {}
         for ref, node_id in checkpoint.columns.items():
             if node_id not in graph_nodes:
                 issues.append(
@@ -330,11 +410,24 @@ def _initial_snapshot_views(
                         message=f"Checkpoint column '{ref}' points to missing node '{node_id}'",
                     )
                 )
-            refs[ref] = node_id
+            node = graph_nodes.get(node_id)
+            refs[ref] = PlanColumnView(
+                ref=ref,
+                name=ref.rsplit(".", 1)[-1],
+                snapshot=name,
+                dtype=node.dtype if node is not None else None,
+                source_column=node.source_column if node is not None else None,
+                materialized_node_id=node_id,
+            )
         views[name] = _SnapshotView(
             name=name,
             refs=refs,
             producer_unit_id=snapshot.created_by_unit_id,
+            parent_snapshot_names=tuple(
+                names_by_id[parent_id]
+                for parent_id in snapshot.parent_snapshot_ids
+                if parent_id in names_by_id
+            ),
         )
     return views
 
@@ -404,7 +497,12 @@ def _validate_derive(
             )
         )
     existing_output = output_ref in view.refs
-    existing_node = graph_nodes.get(view.refs.get(output_ref, ""))
+    existing_column = view.refs.get(output_ref)
+    existing_node = (
+        graph_nodes.get(existing_column.materialized_node_id)
+        if existing_column is not None and existing_column.materialized_node_id is not None
+        else None
+    )
     output_is_same_producer = bool(
         existing_node is not None
         and existing_node.created_by_unit_id == unit.unit_id
@@ -425,7 +523,12 @@ def _validate_derive(
         planned_producers,
         issues,
     )
-    view.refs[output_ref] = f"planned:unit_{unit.unit_id}:{output_ref}"
+    view.refs[output_ref] = PlanColumnView(
+        ref=output_ref,
+        name=output_ref.rsplit(".", 1)[-1],
+        snapshot=unit.input_snapshot,
+        planned_by_unit_id=unit.unit_id,
+    )
     planned_producers[unit.input_snapshot] = unit.unit_id
 
 
@@ -458,14 +561,22 @@ def _validate_filter(
         planned_producers,
         issues,
     )
-    output_refs = {
-        _replace_snapshot_prefix(ref, unit.input_snapshot, unit.output_snapshot): node_id
-        for ref, node_id in view.refs.items()
-    }
+    output_refs: dict[str, PlanColumnView] = {}
+    for ref, column in view.refs.items():
+        output_ref = _replace_snapshot_prefix(ref, unit.input_snapshot, unit.output_snapshot)
+        output_refs[output_ref] = PlanColumnView(
+            ref=output_ref,
+            name=output_ref.rsplit(".", 1)[-1],
+            snapshot=unit.output_snapshot,
+            dtype=column.dtype,
+            source_column=column.source_column,
+            planned_by_unit_id=unit.unit_id,
+        )
     views[unit.output_snapshot] = _SnapshotView(
         name=unit.output_snapshot,
         refs=output_refs,
         producer_unit_id=unit.unit_id,
+        parent_snapshot_names=(unit.input_snapshot,),
     )
     planned_producers[unit.output_snapshot] = unit.unit_id
 
@@ -562,14 +673,31 @@ def _validate_join(
         issues,
         allow_reexecution=allow_reexecution,
     )
-    output_refs = {
-        f"{unit.output_snapshot}.{selected.as_}": f"planned:unit_{unit.unit_id}:{selected.as_}"
-        for selected in unit.select
-    }
+    output_refs: dict[str, PlanColumnView] = {}
+    for selected in unit.select:
+        output_ref = f"{unit.output_snapshot}.{selected.as_}"
+        matching_role = _role_for_snapshot(selected.from_, by_role)
+        source_view = role_views.get(matching_role or "")
+        source_column = (
+            source_view.refs.get(selected.from_)
+            if source_view is not None
+            else None
+        )
+        output_refs[output_ref] = PlanColumnView(
+            ref=output_ref,
+            name=selected.as_,
+            snapshot=unit.output_snapshot,
+            dtype=source_column.dtype if source_column is not None else None,
+            source_column=(
+                source_column.source_column if source_column is not None else None
+            ),
+            planned_by_unit_id=unit.unit_id,
+        )
     views[unit.output_snapshot] = _SnapshotView(
         name=unit.output_snapshot,
         refs=output_refs,
         producer_unit_id=unit.unit_id,
+        parent_snapshot_names=tuple(item.snapshot for item in unit.inputs),
     )
     planned_producers[unit.output_snapshot] = unit.unit_id
 

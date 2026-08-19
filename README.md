@@ -41,15 +41,33 @@ pip install -e ".[dev,web]"
 uvicorn src.api.app:app --reload
 ```
 
-Open `http://127.0.0.1:8000`. The zero-build frontend supports multi-file
-upload, source/Snapshot grouping, qualified-column selection,
-operation-specific workspace editing, bounded Copilot chat, execution, warning
-and stale-state display, rerun, dashboard pins, and report generation. The
-active session is restored after a server or browser restart.
+For frontend development, run the Vite workspace in a second terminal:
 
-The web workspace is the supported application surface. The former one-file
-CLI was retired because it could not provide the same Snapshot, Checkpoint,
-and column-first editing model as the browser.
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The M2 React shell provides server-backed
+Project history, Project creation, switching, durable rename, and stable
+Explorer, Plan Canvas, Agent, and Output Dock mounting regions. M3 connects
+Plan Canvas to the canonical Plan v2 DAG with durable presentation layout and
+server-confirmed dependency edge edits. M4 connects the Explorer to public
+Sources/Snapshots/profile projections and typed operation editing. Vite proxies
+`/api` requests to FastAPI. To build the production frontend into FastAPI's
+existing `static/` mount, run `npm run build` from `frontend/`, then open
+`http://127.0.0.1:8000`.
+
+The React/Vite workspace is the supported browser surface. The Agent panel is
+Project-local and Thread-isolated. The Output Dock connects execution polling,
+unit results, warnings, charts, unit/cascade reruns, and retained Markdown
+reports. Its Dashboard tab is an explicit deferred placeholder; the React
+client does not call the compatibility dashboard pin routes. The production
+build is served from FastAPI's `static/` mount, and the former zero-build
+`static/app.js` and `static/styles.css` entry are retired.
+The former one-file CLI was retired because it could not provide the same
+Snapshot, Checkpoint, and column-first editing model as the browser.
 
 ## LLM Configuration
 
@@ -71,6 +89,12 @@ Optional stage overrides include `DATAINSIGHT_LLM_MODEL_PLANNER`,
 pytest -q
 ruff check .
 mypy src/
+cd frontend
+npm run typecheck
+npm run lint
+npm run test
+npm run build
+git diff --check
 ```
 
 Cycle 5 validation evidence is recorded in
@@ -82,7 +106,8 @@ Cycle 5 validation evidence is recorded in
 src/agent/              state, graph, planner, DAG, templates, execution nodes
 src/api/                FastAPI session-scoped workspace API
 src/sandbox/            deterministic inspection and terminal subprocess runner
-static/                 zero-build browser workspace
+frontend/               React, TypeScript, and Vite workspace source
+static/                 generated Vite production frontend served by FastAPI
 tests/                  unit, integration, and API tests
 docs/                   current product, architecture, and roadmap documents
 docs/cycles/            cycle summaries and archived PRDs/plans

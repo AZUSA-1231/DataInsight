@@ -10,14 +10,20 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import cast
 
 from pydantic import BaseModel
 
-from src.agent.state import AgentState, ColumnNode, DataSource, SnapshotRecord
+from src.agent.state import (
+    AgentChatMessage,
+    AgentState,
+    ColumnNode,
+    DataSource,
+    SnapshotRecord,
+)
 
 _MAX_HISTORY_MESSAGES = 10
 _MAX_MESSAGE_CHARS = 4000
@@ -385,11 +391,21 @@ def build_workspace_context(state: AgentState) -> dict[str, object]:
     }
 
 
-def _project_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
+def _project_history(history: Sequence[object]) -> list[dict[str, str]]:
     projected: list[dict[str, str]] = []
     for turn in history[-_MAX_HISTORY_MESSAGES:]:
-        role = turn.get("role")
-        content = turn.get("content")
+        role: str | None
+        content: str | None
+        if isinstance(turn, AgentChatMessage):
+            role = turn.role
+            content = turn.content
+        elif isinstance(turn, Mapping):
+            raw_role = turn.get("role")
+            raw_content = turn.get("content")
+            role = raw_role if isinstance(raw_role, str) else None
+            content = raw_content if isinstance(raw_content, str) else None
+        else:
+            continue
         if role not in {"user", "assistant"} or not content:
             continue
         projected.append(
@@ -401,11 +417,18 @@ def _project_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
     return projected
 
 
-def build_copilot_context(state: AgentState, current_request: str) -> dict[str, object]:
+def build_copilot_context(
+    state: AgentState,
+    current_request: str,
+    *,
+    conversation: Sequence[object] | None = None,
+) -> dict[str, object]:
     """Build the complete JSON context sent for a single Copilot turn."""
 
     return {
-        "conversation": _project_history(state.dialogue_history or []),
+        "conversation": _project_history(
+            state.dialogue_history if conversation is None else conversation
+        ),
         "workspace": build_workspace_context(state),
         "current_request": current_request,
     }

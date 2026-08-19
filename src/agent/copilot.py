@@ -22,7 +22,7 @@ from src.agent.copilot_context import build_copilot_context
 from src.agent.input_guard import sanitize_user_input
 from src.agent.llm import get_llm
 from src.agent.prompts import load_prompt
-from src.agent.state import AgentState
+from src.agent.state import AgentChatThread, AgentState
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,30 @@ class StateStore(Protocol):
     def update(self, session_id: str, patch: dict[str, object]) -> AgentState: ...
 
 
+class ThreadStateStore(StateStore, Protocol):
+    """Additional persistence boundary used by the Cycle 7 thread path."""
+
+    def get_agent_thread(
+        self,
+        session_id: str,
+        thread_id: str,
+    ) -> AgentChatThread | None: ...
+
+    def append_agent_turn(
+        self,
+        session_id: str,
+        thread_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> AgentState: ...
+
+
 class CopilotSessionNotFoundError(LookupError):
     """Raised when a turn references a missing session."""
+
+
+class CopilotThreadNotFoundError(LookupError):
+    """Raised when a turn references a Thread outside the addressed Project."""
 
 
 class CopilotInvalidMessageError(ValueError):
@@ -265,7 +287,13 @@ class CopilotTurnHandler:
         self._max_model_calls = max_model_calls
         self._max_total_tool_calls = max_total_tool_calls
 
-    def handle(self, session_id: str, message: str) -> CopilotTurnResult:
+    def handle(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        thread_id: str | None = None,
+    ) -> CopilotTurnResult:
         state = self._store.get(session_id)
         if state is None:
             raise CopilotSessionNotFoundError(session_id)
@@ -280,8 +308,18 @@ class CopilotTurnHandler:
             max_model_calls=self._max_model_calls,
             max_total_tool_calls=self._max_total_tool_calls,
         )
+        selected_thread: AgentChatThread | None = None
+        if thread_id is not None:
+            thread_store = cast(ThreadStateStore, self._store)
+            selected_thread = thread_store.get_agent_thread(session_id, thread_id)
+            if selected_thread is None:
+                raise CopilotThreadNotFoundError(thread_id)
         try:
-            context = build_copilot_context(state, user_message)
+            context = build_copilot_context(
+                state,
+                user_message,
+                conversation=(selected_thread.messages if selected_thread else None),
+            )
             messages: list[BaseMessage] = [
                 SystemMessage(content=_base_prompt(selection.name, selection.unknown_name)),
                 HumanMessage(
@@ -301,15 +339,30 @@ class CopilotTurnHandler:
         latest_state = self._store.get(session_id)
         if latest_state is None:
             raise CopilotSessionNotFoundError(session_id)
-        persisted_history = _history_with_turn(
-            latest_state, user_message, result.message
-        )
-        self._store.update(
-            session_id,
-            {
-                "dialogue_history": persisted_history,
-            },
-        )
+        if selected_thread is not None:
+            thread_store = cast(ThreadStateStore, self._store)
+            try:
+                thread_store.append_agent_turn(
+                    session_id,
+                    selected_thread.thread_id,
+                    user_message,
+                    result.message,
+                )
+            except (KeyError, LookupError) as exc:
+                raise CopilotThreadNotFoundError(selected_thread.thread_id) from exc
+        else:
+            # Compatibility for direct Cycle 6 callers that do not provide a
+            # Thread ID. The React path always sends one explicitly; the
+            # compatibility /dialogue route uses the Project Thread adapter.
+            persisted_history = _history_with_turn(
+                latest_state, user_message, result.message
+            )
+            self._store.update(
+                session_id,
+                {
+                    "dialogue_history": persisted_history,
+                },
+            )
         result.skill = selection.name
         return result
 

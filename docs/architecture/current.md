@@ -32,16 +32,18 @@ operation-specific Pydantic contract used by the workspace API.
 The active browser chat is an overlay on that workflow:
 
 ```text
-POST /copilot
-  -> fresh workspace projection + recent dialogue history
+Project-local Thread list/detail
+  -> POST /copilot with explicit thread_id
+  -> fresh workspace projection + recent selected-Thread history
   -> bounded Copilot model/tool exchange
-  -> normal assistant response
+  -> final response and one user/assistant pair appended to that Thread
 ```
 
 The Copilot can inspect workspace facts and propose a complete Plan edit, but
-it does not commit Plan, execution, or report state. The former `/dialogue`
-route remains only as a compatibility entry point for existing clients; the
-browser no longer uses its Business Track loop.
+it does not commit Plan, execution, or report state. Thread messages are
+Project-local and never become a global browser history. The former
+`/dialogue` route remains only as a compatibility entry point for existing
+clients; the browser no longer uses its Business Track loop.
 
 ## Durable State
 
@@ -53,6 +55,7 @@ browser no longer uses its Business Track loop.
 | `SnapshotRecord` | Logical view, parent Snapshots, and current checkpoint head |
 | `CheckpointRecord` | Immutable Parquet result, parent checkpoints, row count, and qualified-column map |
 | `ColumnNode` | Concrete column version, source origin, direct parents, and creating unit |
+| `AgentChatThread` | Named ordered user/assistant messages owned by one Project |
 
 Source ingestion accepts CSV and Excel files, creates an ASCII Snapshot name,
 adds hidden `__di_row_id` values, and writes a normalized source Parquet file
@@ -117,18 +120,63 @@ dependent chain using newly produced outputs.
 
 ## Interfaces
 
-FastAPI exposes session, data, Copilot, compatibility dialogue, workspace,
-execution, dashboard, and report routes. The data surface includes
+FastAPI exposes session, data, Project-owned Agent Thread, Copilot,
+compatibility dialogue, workspace, execution, dashboard, and report routes.
+The data surface includes
 source/profile filtering, Snapshot heads, visible qualified columns, and
 public `/data/lineage` projections that hide internal column-node IDs.
 Execution responses expose run IDs, checkpoint references, row counts,
 warnings, stale state, and rerun results.
 
-The zero-build browser supports multi-file upload, source/Snapshot grouping,
-qualified-column drag and drop, operation-specific Derive/Filter/Join/Terminal
-forms, bounded Copilot chat, execution polling, warning display, stale/rerun
-controls, dashboards, and reports. Internal checkpoint IDs and column-node IDs
-are backend metadata, not editable frontend objects.
+The supported browser surface is now the React/TypeScript/Vite workspace. The
+M2 shell provides server-backed Project history, Project creation, switching,
+durable title rename, and stable Explorer, Plan Canvas, Agent, and Output Dock
+mounting regions. M3 connects the Plan Canvas to the canonical Plan v2
+projection: each Unit maps to one `unit:<unit_id>` node, each `depends_on`
+relation maps to one edge, and positions, viewport, and collapsed state persist
+through the presentation-only Workspace layout API. Semantic edge edits are
+validated through the existing Unit API; layout changes never modify Plan or
+execution state. Internal checkpoint IDs and column-node IDs are backend
+metadata, not editable frontend objects. M4 connects the Explorer to the
+Project-scoped public data projections, supports upload and profile inspection,
+and exposes typed Derive, Filter, Join, and Terminal creation/editing through
+the same server-confirmed Unit API. Operation creation is click-driven;
+qualified column drags target explicit Unit slots and empty-canvas column drops
+are rejected without creating a Unit or opening a chooser. The Unit Inspector
+is a node-adjacent, internally scrollable editor, and column lists shown there
+are read-only summaries so column changes have one primary path. Delete
+conflicts remain server-authoritative through explicit cascade actions. Canvas
+movement updates local presentation state and writes one finite, bounded layout
+after drag stop or pan/zoom end; a latest-pending queue prevents an older write
+from overtaking a newer one. Initial fallback positions are not written until a
+user gesture or explicit Unit/layout change occurs.
+M5 mounts the Agent panel with Project-local Thread list/create/select/reload
+behavior, full selected-Thread history, and an explicit-thread bounded Copilot
+composer. The panel cancels stale list, detail, and send requests on
+Project/Thread changes and never applies Plan proposal output. M6 mounts the
+Output Dock below the center canvas. Results polls only the active Project,
+shows server status, stable Unit results, row-count metadata, warnings,
+insights, logs, safe chart references, stale markers, and unit/cascade rerun
+actions. Terminal execution refreshes Project, Explorer, and Plan projections
+from the server. Report loads and generates retained Markdown while preserving
+the previous report on errors. Dashboard is an explicit empty placeholder and
+does not call the compatibility pin routes.
+
+The Explorer also consumes one read-only `/data/workspace-projection` response.
+For a valid Plan, the server reuses Plan validation's topological schema
+simulation to expose planned Snapshot and column views without creating
+registry records, checkpoints, files, or numeric execution facts. A planned
+view uses a public UI identity derived from its producing Unit; materialized
+views continue to use their durable Snapshot IDs. The frontend refreshes this
+catalog after a server-confirmed Plan mutation without reloading Canvas layout
+state. Canvas position and collapse writes carry a local revision; responses
+only advance the confirmed-layout reference and cannot overwrite newer local
+movement. Viewport movement remains presentation-local and is not persisted.
+
+The maintained browser source lives under `frontend/`; `npm run build` writes
+the production bundle to `static/`, which FastAPI serves at `/` and direct
+`/projects/{project_id}` routes. The retired zero-build `static/app.js` and
+`static/styles.css` are no longer runtime dependencies.
 
 `SessionStore` caches states in memory and atomically persists JSON under
 `data/sessions/{session_id}/state.json`. Executor-only result keys beginning

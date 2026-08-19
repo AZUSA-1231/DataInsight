@@ -1,108 +1,14 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DataInsight</title>
-<link rel="stylesheet" href="/styles.css">
-</head>
-<body>
-
-<header id="header">
-  <div class="header-logo">
-    <div class="icon" aria-hidden="true">DI</div>
-    <span>DataInsight</span>
-  </div>
-  <div class="header-session">
-    <span class="session-dot" id="session-dot"></span>
-    <span class="session-id" id="session-id">initializing...</span>
-    <button class="btn-new-session" id="btn-new-session" title="New Session">+ New</button>
-  </div>
-</header>
-
-<aside id="panel-left">
-  <div class="section-title">Data Sources</div>
-  <div class="upload-zone" id="upload-zone">
-    <div id="upload-empty">
-      <div class="upload-icon" aria-hidden="true">+</div>
-      <div class="upload-text">Drop CSV / Excel files here</div>
-      <div class="upload-hint">or click to browse multiple files</div>
-    </div>
-    <div id="upload-file" class="hidden">
-      <div class="upload-file-info">
-        <span class="upload-file-name" id="file-name">Sources</span>
-        <span class="upload-file-shape" id="file-shape"></span>
-      </div>
-    </div>
-    <input type="file" id="file-input" accept=".csv,.xlsx,.xls" multiple hidden>
-    <div id="upload-error" class="upload-error hidden"></div>
-  </div>
-  <div class="source-list" id="sources-list">
-    <div class="empty-state">Upload one or more files to create Snapshots.</div>
-  </div>
-
-  <div class="section-title">Qualified Columns</div>
-  <div class="column-list" id="column-list">
-    <div class="empty-state">Upload a file to see columns</div>
-  </div>
-</aside>
-
-<main id="panel-center">
-  <div class="section-title workspace-title">Workspace</div>
-  <div class="workspace-area" id="workspace-area">
-    <div class="empty-state" id="workspace-empty">Add an operation to build the analysis DAG.</div>
-  </div>
-  <div class="workspace-toolbar">
-    <select id="add-unit-operation" aria-label="Operation to add">
-      <option value="terminal">Terminal</option>
-      <option value="derive_column">Derive</option>
-      <option value="filter">Filter</option>
-      <option value="join">Join</option>
-    </select>
-    <button class="btn-add-unit" id="btn-add-unit">+ Add operation</button>
-  </div>
-
-  <div class="action-bar">
-    <button class="btn btn-primary" id="btn-generate-plan">Generate Plan</button>
-    <button class="btn btn-primary" id="btn-execute">Execute</button>
-    <span class="status-badge idle" id="exec-status-badge">idle</span>
-    <span id="exec-spinner" class="hidden"><span class="spinner"></span></span>
-    <span class="execution-summary" id="execution-summary"></span>
-  </div>
-
-  <div class="results-area hidden" id="results-area">
-    <div class="section-title results-title">Results</div>
-    <div id="results-list"></div>
-  </div>
-
-  <div class="dialogue-area" id="dialogue-area">
-    <div class="dialogue-messages" id="dialogue-messages">
-      <div class="dialogue-msg assistant">
-        <div class="sender">AI</div>
-        <div class="content">Upload sources, then describe the analysis you need.</div>
-      </div>
-    </div>
-    <div class="dialogue-input-row">
-      <input type="text" class="dialogue-input" id="dialogue-input"
-             placeholder="Describe your analysis requirement..." autocomplete="off">
-      <button class="dialogue-send" id="dialogue-send">Send</button>
-    </div>
-  </div>
-</main>
-
-<aside id="panel-right">
-  <div class="section-title">Dashboard</div>
-  <div id="dashboard-area">
-    <div class="dashboard-grid" id="dashboard-grid">
-      <div class="empty-state" style="grid-column:1/-1;">Pin charts from execution results</div>
-    </div>
-  </div>
-  <div class="report-area">
-    <button class="btn btn-secondary report-button" id="btn-generate-report">Generate Report</button>
-    <div class="report-output hidden" id="report-output"></div>
-  </div>
-</aside>
-
-<script src="/app.js"></script>
-</body>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f7f9fc" />
+    <title>DataInsight Workspace</title>
+    <script type="module" crossorigin src="/assets/index-x7JOyFiA.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DyKFdDVP.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
 </html>

@@ -106,6 +106,59 @@ class ColumnGraph(BaseModel):
     nodes: dict[str, ColumnNode] = Field(default_factory=dict)
 
 
+class AgentChatMessage(BaseModel):
+    """One durable human or assistant message inside an Agent Thread."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20_000)
+    created_at: str = Field(min_length=1, max_length=80)
+
+
+class AgentChatThread(BaseModel):
+    """One Project-owned, isolated Agent conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    thread_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=120)
+    created_at: str = Field(min_length=1, max_length=80)
+    updated_at: str = Field(min_length=1, max_length=80)
+    messages: list[AgentChatMessage] = Field(default_factory=list)
+
+
+class WorkspaceNodeLayout(BaseModel):
+    """Presentation-only position and collapsed state for one Plan Unit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unit_id: int = Field(gt=0)
+    x: float = Field(allow_inf_nan=False)
+    y: float = Field(allow_inf_nan=False)
+    collapsed: bool = False
+
+
+class WorkspaceViewport(BaseModel):
+    """Presentation-only Plan Canvas viewport."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = Field(default=0.0, allow_inf_nan=False)
+    y: float = Field(default=0.0, allow_inf_nan=False)
+    zoom: float = Field(default=1.0, gt=0, le=4, allow_inf_nan=False)
+
+
+class WorkspaceLayout(BaseModel):
+    """Versioned presentation state; it has no Plan semantics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    viewport: WorkspaceViewport = Field(default_factory=WorkspaceViewport)
+    nodes: list[WorkspaceNodeLayout] = Field(default_factory=list)
+
+
 class Suggestion(BaseModel):
     """A "perhaps consider" hint for the Planner — not a directive.
 
@@ -480,6 +533,8 @@ class AgentState(BaseModel):
     # runtime adapter until the Plan v2 migration is complete.
     schema_version: int = 2
     user_requirement: str
+    project_title: str = Field(default="Untitled project", min_length=1, max_length=120)
+    created_at: str | None = None
     data_sources: list[DataSource] = Field(default_factory=list)
     snapshot_registry: dict[str, SnapshotRecord] = Field(default_factory=dict)
     checkpoint_registry: dict[str, CheckpointRecord] = Field(default_factory=dict)
@@ -499,4 +554,6 @@ class AgentState(BaseModel):
     feedback: str | None = None
     dashboard_pins: list[dict[str, Any]] = Field(default_factory=list)
     dialogue_history: list[dict[str, str]] = Field(default_factory=list)
+    agent_threads: list[AgentChatThread] = Field(default_factory=list)
+    workspace_layout: WorkspaceLayout = Field(default_factory=WorkspaceLayout)
     persisted_at: str | None = None
