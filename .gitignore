@@ -33,12 +33,14 @@ CLAUDE.md
 
 # Local settings (may contain personal paths)
 .claude/settings.local.json
+
+# Historical Kaggle-based real-data test corpus; keep local only.
+real_test/
+
 *.csv
 
-# Real test generated outputs
-real_test/train_intermediates/
-real_test/charts/
-real_test/train_analysis_report.md
+# Maintained tests use small deterministic CSV fixtures.
+!tests/**/*.csv
 
 # Runtime sessions, uploads, checkpoints, and generated artifacts
 data/
