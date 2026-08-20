@@ -100,8 +100,8 @@ git diff --check
 ```
 
 GitHub Actions runs the same backend and frontend checks on Python 3.12 and
-3.13, with the web extra installed and the frontend dependencies resolved from
-`frontend/package-lock.json`.
+3.13, with the web extra installed, Ruff pinned to `0.16.3`, and the frontend
+dependencies resolved from `frontend/package-lock.json`.
 
 Cycle 5 validation evidence is recorded in
 `docs/cycles/cycle-5-column-lineage/summary.md`.

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -607,11 +607,7 @@ COPILOT_TOOL_SCHEMAS: dict[str, dict[str, object]] = {
 }
 
 
-InputModelT = TypeVar("InputModelT", bound=BaseModel)
-OutputModelT = TypeVar("OutputModelT", bound=BaseModel)
-
-
-def _typed_handler(
+def _typed_handler[InputModelT: BaseModel, OutputModelT: BaseModel](
     input_model: type[InputModelT],
     output_model: type[OutputModelT],
     handler: Callable[[AgentState, InputModelT], OutputModelT],
