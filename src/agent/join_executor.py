@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 
 import pandas as pd
 
@@ -108,10 +108,7 @@ def execute_join(
     else:
         if unit.how not in {"left", "right", "inner", "outer"}:
             raise JoinExecutionError(f"Unsupported pandas join mode '{unit.how}'")
-        pandas_how = cast(
-            Literal["left", "right", "inner", "outer"],
-            unit.how,
-        )
+        pandas_how: Literal["left", "right", "inner", "outer"] = unit.how
         output_internal = left_internal.merge(
             right_internal,
             how=pandas_how,

@@ -37,7 +37,9 @@ jobs:
           ruff check .
 
       - name: Type check (mypy)
-        run: mypy src/
+        run: |
+          mypy --version
+          mypy src/
 
       - name: Test (pytest + coverage)
         run: pytest -v --cov=src --cov-report=term-missing
