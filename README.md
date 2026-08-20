@@ -45,7 +45,7 @@ For frontend development, run the Vite workspace in a second terminal:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -90,12 +90,18 @@ pytest -q
 ruff check .
 mypy src/
 cd frontend
+npm ci
 npm run typecheck
 npm run lint
 npm run test
 npm run build
+cd ..
 git diff --check
 ```
+
+GitHub Actions runs the same backend and frontend checks on Python 3.12 and
+3.13, with the web extra installed and the frontend dependencies resolved from
+`frontend/package-lock.json`.
 
 Cycle 5 validation evidence is recorded in
 `docs/cycles/cycle-5-column-lineage/summary.md`.
